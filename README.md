@@ -146,3 +146,7 @@ data/
 * **Phân chia theo Quả (Sample-Level):** Tất cả các góc ảnh RGB, file âm thanh, ảnh nhiệt, ảnh phổ và dòng CSV của cùng một quả sầu riêng **bắt buộc phải cùng nằm trong một tập duy nhất** (`train`, `val`, hoặc `test`).
 * **Không bị Data Leakage:** Tránh tình trạng ảnh góc TOP của quả nằm ở `train` mà bảng CSV hoặc ảnh góc BOT lại nằm ở `test`.
 * **Phân tầng cân bằng (Stratified):** Đảm bảo tỷ lệ 3 lớp độ chín (`Unripe`, `Ripe`, `Overripe`) được phân bổ đồng đều ở cả 3 tập Train (44 quả/lớp), Val (~9-10 quả/lớp), Test (~9-10 quả/lớp).
+
+### 4 Lưu ý khi up data lên github
+
+* **Bắt buộc**: Tạo nhánh trước khi up lên github, tên nhánh sẽ được đặt trùng với tên tài khoản github của thành viên đó.
