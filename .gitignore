@@ -33,3 +33,7 @@ outputs/figures/*
 !outputs/figures/.gitkeep
 outputs/tables/*
 !outputs/tables/.gitkeep
+
+# Temporary cache and demo samples
+demo_vision_samples/
+colab_temp_cache/
