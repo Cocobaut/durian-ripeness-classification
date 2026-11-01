@@ -13,6 +13,9 @@ data/raw/*
 !data/raw/.gitkeep
 data/*.joblib
 
+data/split_data/*/dataset_clean_*/*
+!data/split_data/*/dataset_clean_*/.gitkeep
+
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/
 */.ipynb_checkpoints/
@@ -37,3 +40,6 @@ outputs/tables/*
 # Temporary cache and demo samples
 demo_vision_samples/
 colab_temp_cache/
+
+# macOS
+.DS_Store
