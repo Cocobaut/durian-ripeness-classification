@@ -252,13 +252,65 @@ def build_integrated_sensor_dataframe(
     split_path = Path(split_dir)
     
     if include_thermal:
-        th_records = [extract_fruit_thermal_vector(fid, split_path) for fid in df_out["fruit_id"]]
+        th_dir = split_path / "dataset_clean_thermal" if (split_path / "dataset_clean_thermal").exists() else split_path
+        th_files = list(th_dir.glob("*_thermal.csv"))
+        th_file_map = {}
+        for f in th_files:
+            m = re.search(r"(durian_\d{3})", f.name)
+            if m:
+                th_file_map.setdefault(m.group(1), []).append(f)
+                
+        th_records = []
+        for fid in df_out["fruit_id"]:
+            matched = th_file_map.get(fid, [])
+            if not matched:
+                th_records.append({k: np.nan for k in THERMAL_FEATURE_COLS})
+                continue
+            rows = []
+            for f in matched:
+                mat = load_thermal_matrix(f)
+                if mat is not None:
+                    feats = extract_thermal_features(mat)
+                    rows.append({
+                        "fg_mean_temp": feats["fg_mean"],
+                        "fg_std_temp": feats["fg_std"],
+                        "delta_temp_fg_bg": feats["delta_temp_fg_bg"],
+                    })
+            if rows:
+                th_records.append(pd.DataFrame(rows).mean().to_dict())
+            else:
+                th_records.append({k: np.nan for k in THERMAL_FEATURE_COLS})
+                
         th_df = pd.DataFrame(th_records, index=df_out.index)
         for c in THERMAL_FEATURE_COLS:
             df_out[c] = th_df[c]
             
     if include_multispectral:
-        ms_records = [extract_fruit_multispectral_vector(fid, split_path) for fid in df_out["fruit_id"]]
+        ms_dir = split_path / "dataset_clean_multispectral" if (split_path / "dataset_clean_multispectral").exists() else split_path
+        ms_files = list(ms_dir.glob("*.tif"))
+        ms_file_map = {}
+        for f in ms_files:
+            m = re.search(r"(durian_\d{3})", f.name)
+            if m:
+                ms_file_map.setdefault(m.group(1), []).append(f)
+                
+        ms_records = []
+        for fid in df_out["fruit_id"]:
+            matched = ms_file_map.get(fid, [])
+            if not matched:
+                ms_records.append({k: np.nan for k in MULTISPECTRAL_FEATURE_COLS})
+                continue
+            rows = []
+            for f in matched:
+                raw_img = safe_read_tif(f)
+                if raw_img is not None:
+                    feats = extract_multispectral_features(raw_img)
+                    rows.append({k: feats[k] for k in MULTISPECTRAL_FEATURE_COLS})
+            if rows:
+                ms_records.append(pd.DataFrame(rows).mean().to_dict())
+            else:
+                ms_records.append({k: np.nan for k in MULTISPECTRAL_FEATURE_COLS})
+                
         ms_df = pd.DataFrame(ms_records, index=df_out.index)
         for c in MULTISPECTRAL_FEATURE_COLS:
             df_out[c] = ms_df[c]
