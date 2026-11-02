@@ -544,6 +544,8 @@ class AudioPreprocessor:
                 part.columns = ["file", "original_name", "record_time", "size_bytes"]
                 part = part.assign(split=split).drop_duplicates()
                 time = pd.to_datetime(part["record_time"], errors="coerce")
+                if hasattr(time.dt, "tz") and time.dt.tz is not None:
+                    time = time.dt.tz_localize(None)
                 if device == "iphone":
                     time = time + pd.Timedelta(hours=tz_offset_hours)
                 records.append(part.assign(record_time_local=time))
