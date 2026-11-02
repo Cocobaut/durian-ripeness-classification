@@ -1,0 +1,2 @@
+Tập dữ liệu,Số file,Số quả,Accuracy,Macro-F1,Weighted-F1,F1 unripe,F1 ripe,F1 overripe,Macro-F1 iPhone,Macro-F1 Android
+Test độc lập (Hold-out),64,25,0.859,0.811,0.862,0.941,0.778,0.714,0.803,0.822

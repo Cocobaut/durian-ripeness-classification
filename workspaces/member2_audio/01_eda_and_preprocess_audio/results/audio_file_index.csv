@@ -1,0 +1,49 @@
+file,split,fruit_id,label,device,label_suspect,label_corrected,reason,is_duplicate,duplicate_of,session_id,xcorr_pair,gap_hours,original_name,record_time_local,md5,fruit_ripeness,matches_fruit_ripeness
+durian_001_unripe_android.wav,test,1,unripe,android,False,unripe,,False,,001-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,d3e5a87b9c9aae17ff379532d41991de,unripe,True
+durian_001_unripe_iphone.m4a,test,1,unripe,iphone,False,unripe,,False,,001-S1,1.0,,orig_1_unripe-UN.m4a,2025-09-10 10:00:00,f1f555985adf9cc0e05907f0a8ce28ed,unripe,True
+durian_002_unripe_android.wav,test,2,unripe,android,False,unripe,,False,,002-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,587546be25f94bf2e02864b33274ca7f,unripe,True
+durian_002_unripe_iphone.m4a,test,2,unripe,iphone,False,unripe,,False,,002-S1,1.0,,orig_2_unripe-UN.m4a,2025-09-10 10:00:00,106a7b36a27b8cb0bc94d05e1819db6a,unripe,True
+durian_003_unripe_android.wav,test,3,unripe,android,False,unripe,,False,,003-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,f510112c359ea84a369e31cd522adb27,unripe,True
+durian_003_unripe_iphone.m4a,test,3,unripe,iphone,False,unripe,,False,,003-S1,1.0,,orig_3_unripe-UN.m4a,2025-09-10 10:00:00,0108fce0fb84f8b2d8848500d4f6f25b,unripe,True
+durian_008_ripe_android.wav,test,8,ripe,android,False,ripe,,False,,008-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,1e7aacfc3f97386a6f4ec196dfcd5c67,ripe,True
+durian_008_ripe_iphone.m4a,test,8,ripe,iphone,False,ripe,,False,,008-S1,1.0,,orig_8_ripe-RI.m4a,2025-09-10 10:00:00,fbc6c27efed31e6a218736d11bbe5cfa,ripe,True
+durian_009_ripe_android.wav,test,9,ripe,android,False,ripe,,False,,009-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,6032c1ba4655a514dcef02795d328a6e,ripe,True
+durian_009_ripe_iphone.m4a,test,9,ripe,iphone,False,ripe,,False,,009-S1,1.0,,orig_9_ripe-RI.m4a,2025-09-10 10:00:00,e2850afc87639d543b31b053268e564b,ripe,True
+durian_010_ripe_android.wav,test,10,ripe,android,False,ripe,,False,,010-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,a662a1f86f4d3f9aa6fe3d1e415aaf4a,ripe,True
+durian_010_ripe_iphone.m4a,test,10,ripe,iphone,False,ripe,,False,,010-S1,1.0,,orig_10_ripe-RI.m4a,2025-09-10 10:00:00,659cfa86cf68a03769cceab2d3b55e62,ripe,True
+durian_015_overripe_android.wav,test,15,overripe,android,False,overripe,,False,,015-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,e484660dbcc134fff5d3aeca6759fb27,overripe,True
+durian_015_overripe_iphone.m4a,test,15,overripe,iphone,False,overripe,,False,,015-S1,1.0,,orig_15_overripe-OR.m4a,2025-09-10 10:00:00,69b3cc2e62c00af1f9a343abdddcaa52,overripe,True
+durian_016_overripe_android.wav,test,16,overripe,android,False,overripe,,False,,016-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,685cc9d575d84edb12c427a13ba4ce7d,overripe,True
+durian_016_overripe_iphone.m4a,test,16,overripe,iphone,False,overripe,,False,,016-S1,1.0,,orig_16_overripe-OR.m4a,2025-09-10 10:00:00,85378ead5ef70636089599899e176902,overripe,True
+durian_001_unripe_android.wav,train,1,unripe,android,False,unripe,,False,,001-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,f59a3b1055b1964c418d317240cb6f6e,unripe,True
+durian_001_unripe_iphone.m4a,train,1,unripe,iphone,False,unripe,,False,,001-S1,1.0,,orig_1_unripe-UN.m4a,2025-09-10 10:00:00,b160ad6e0e136bf95d64d27dec12ff20,unripe,True
+durian_002_unripe_android.wav,train,2,unripe,android,False,unripe,,False,,002-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,1a73b6f326c8ea9a3692e431333e6b8f,unripe,True
+durian_002_unripe_iphone.m4a,train,2,unripe,iphone,False,unripe,,False,,002-S1,1.0,,orig_2_unripe-UN.m4a,2025-09-10 10:00:00,450de431e2960c00717792477a18b139,unripe,True
+durian_003_unripe_android.wav,train,3,unripe,android,False,unripe,,False,,003-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,5df55938221389440741091cf699b359,unripe,True
+durian_003_unripe_iphone.m4a,train,3,unripe,iphone,False,unripe,,False,,003-S1,1.0,,orig_3_unripe-UN.m4a,2025-09-10 10:00:00,cc936474932e6ee44019aaa6201cc7ab,unripe,True
+durian_008_ripe_android.wav,train,8,ripe,android,False,ripe,,False,,008-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,5f27dbcea85c0e76337c66ecfc5ee65e,ripe,True
+durian_008_ripe_iphone.m4a,train,8,ripe,iphone,False,ripe,,False,,008-S1,1.0,,orig_8_ripe-RI.m4a,2025-09-10 10:00:00,1e4d1d9f31dfaabf5aa2b62d5526e26b,ripe,True
+durian_009_ripe_android.wav,train,9,ripe,android,False,ripe,,False,,009-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,90436507588c787ccb42c6640a0057ef,ripe,True
+durian_009_ripe_iphone.m4a,train,9,ripe,iphone,False,ripe,,False,,009-S1,1.0,,orig_9_ripe-RI.m4a,2025-09-10 10:00:00,9b2368f88c07df29e407b17250371126,ripe,True
+durian_010_ripe_android.wav,train,10,ripe,android,False,ripe,,False,,010-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,9d8b7e17b6dae6ac5bd71e4be13ec78d,ripe,True
+durian_010_ripe_iphone.m4a,train,10,ripe,iphone,False,ripe,,False,,010-S1,1.0,,orig_10_ripe-RI.m4a,2025-09-10 10:00:00,abde646ffaa4dc3a5288cd4fe59b878e,ripe,True
+durian_015_overripe_android.wav,train,15,overripe,android,False,overripe,,False,,015-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,08318cde1abf269fd462da5a48c940db,overripe,True
+durian_015_overripe_iphone.m4a,train,15,overripe,iphone,False,overripe,,False,,015-S1,1.0,,orig_15_overripe-OR.m4a,2025-09-10 10:00:00,e91bbd3a6138ba3c8367cc207f64c4f9,overripe,True
+durian_016_overripe_android.wav,train,16,overripe,android,False,overripe,,False,,016-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,154d15daebf6c175d75917f01059d9b4,overripe,True
+durian_016_overripe_iphone.m4a,train,16,overripe,iphone,False,overripe,,False,,016-S1,1.0,,orig_16_overripe-OR.m4a,2025-09-10 10:00:00,5a68097469ee1216575f6642666a60b7,overripe,True
+durian_001_unripe_android.wav,val,1,unripe,android,False,unripe,,False,,001-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,c6054b803789b51dac8d79669b277fcb,unripe,True
+durian_001_unripe_iphone.m4a,val,1,unripe,iphone,False,unripe,,False,,001-S1,1.0,,orig_1_unripe-UN.m4a,2025-09-10 10:00:00,770933b02a5e50635b5b63fbfbdb4e9d,unripe,True
+durian_002_unripe_android.wav,val,2,unripe,android,False,unripe,,False,,002-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,70f06c24b02773591d59445cfed1c85f,unripe,True
+durian_002_unripe_iphone.m4a,val,2,unripe,iphone,False,unripe,,False,,002-S1,1.0,,orig_2_unripe-UN.m4a,2025-09-10 10:00:00,a32698c396f288278f69b69191b19e0c,unripe,True
+durian_003_unripe_android.wav,val,3,unripe,android,False,unripe,,False,,003-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,67f797625dee6fff58639fae31899117,unripe,True
+durian_003_unripe_iphone.m4a,val,3,unripe,iphone,False,unripe,,False,,003-S1,1.0,,orig_3_unripe-UN.m4a,2025-09-10 10:00:00,59608c667d76549b1bec0efc2b014ea3,unripe,True
+durian_008_ripe_android.wav,val,8,ripe,android,False,ripe,,False,,008-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,b15d4bcee5f17c6c33dc5d41ee52ae21,ripe,True
+durian_008_ripe_iphone.m4a,val,8,ripe,iphone,False,ripe,,False,,008-S1,1.0,,orig_8_ripe-RI.m4a,2025-09-10 10:00:00,4c14b4601d74c21c0fbddd76a0e78133,ripe,True
+durian_009_ripe_android.wav,val,9,ripe,android,False,ripe,,False,,009-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,d4a49b88654b664dede61dcbd7795f6e,ripe,True
+durian_009_ripe_iphone.m4a,val,9,ripe,iphone,False,ripe,,False,,009-S1,1.0,,orig_9_ripe-RI.m4a,2025-09-10 10:00:00,28f02cb6cb906255e17ace0d0e0f89c0,ripe,True
+durian_010_ripe_android.wav,val,10,ripe,android,False,ripe,,False,,010-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,04ec17d3f3cd18e7eaa94a625cd88379,ripe,True
+durian_010_ripe_iphone.m4a,val,10,ripe,iphone,False,ripe,,False,,010-S1,1.0,,orig_10_ripe-RI.m4a,2025-09-10 10:00:00,9e4b3d72ea7e883440ca0fd8c5894289,ripe,True
+durian_015_overripe_android.wav,val,15,overripe,android,False,overripe,,False,,015-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,062ec1f42824977ff32b44b119591c20,overripe,True
+durian_015_overripe_iphone.m4a,val,15,overripe,iphone,False,overripe,,False,,015-S1,1.0,,orig_15_overripe-OR.m4a,2025-09-10 10:00:00,a6adb31899238d178be881ad876436c9,overripe,True
+durian_016_overripe_android.wav,val,16,overripe,android,False,overripe,,False,,016-S1,1.0,0.0,11-24-2025 10.00.wav,2025-09-10 10:00:00,52a83746e8e52b7d63f04df885021c1b,overripe,True
+durian_016_overripe_iphone.m4a,val,16,overripe,iphone,False,overripe,,False,,016-S1,1.0,,orig_16_overripe-OR.m4a,2025-09-10 10:00:00,de246089d4bdcc74ae30dd7eabe01704,overripe,True
