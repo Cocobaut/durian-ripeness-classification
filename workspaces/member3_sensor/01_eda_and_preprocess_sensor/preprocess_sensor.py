@@ -85,9 +85,10 @@ def load_thermal_matrix(csv_path: Union[str, Path]) -> Optional[np.ndarray]:
         csv_path = Path(csv_path)
         if not csv_path.exists():
             return None
-        mat = pd.read_csv(csv_path, header=None).values
-        if mat.shape[1] == 1:
-            mat = pd.read_csv(csv_path, header=None, sep=";").values
+        with open(csv_path, "r", encoding="utf-8", errors="ignore") as fp:
+            first_line = fp.readline()
+        sep = ";" if ";" in first_line else ","
+        mat = pd.read_csv(csv_path, header=None, sep=sep).values
         mat = mat[~np.isnan(mat).all(axis=1)][:, ~np.isnan(mat).all(axis=0)]
         return mat.astype(np.float32)
     except Exception:
@@ -184,8 +185,11 @@ def extract_multispectral_features(img_raw: np.ndarray, fg_percentile: float = 1
 def extract_fruit_thermal_vector(fruit_id: str, search_dir: Union[str, Path]) -> Dict[str, float]:
     """Gộp trung bình đặc trưng ảnh nhiệt qua các góc chụp của một quả."""
     search_path = Path(search_dir)
+    target_dir = search_path / "dataset_clean_thermal" if (search_path / "dataset_clean_thermal").exists() else search_path
     pattern = f"*{fruit_id}*_thermal.csv"
-    matched_files = list(search_path.glob(f"**/{pattern}"))
+    matched_files = list(target_dir.glob(pattern))
+    if not matched_files and target_dir != search_path:
+        matched_files = list(search_path.glob(f"**/{pattern}"))
     
     if not matched_files:
         return {k: np.nan for k in THERMAL_FEATURE_COLS}
@@ -211,8 +215,11 @@ def extract_fruit_thermal_vector(fruit_id: str, search_dir: Union[str, Path]) ->
 def extract_fruit_multispectral_vector(fruit_id: str, search_dir: Union[str, Path]) -> Dict[str, float]:
     """Gộp trung bình phổ phản xạ qua các góc chụp của một quả."""
     search_path = Path(search_dir)
+    target_dir = search_path / "dataset_clean_multispectral" if (search_path / "dataset_clean_multispectral").exists() else search_path
     pattern = f"*{fruit_id}*.tif"
-    matched_files = list(search_path.glob(f"**/{pattern}"))
+    matched_files = list(target_dir.glob(pattern))
+    if not matched_files and target_dir != search_path:
+        matched_files = list(search_path.glob(f"**/{pattern}"))
     
     if not matched_files:
         return {k: np.nan for k in MULTISPECTRAL_FEATURE_COLS}
