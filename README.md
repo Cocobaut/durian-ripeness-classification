@@ -58,6 +58,14 @@ Thành viên tự truy cập vào các đường dẫn Google Drive công khai d
   * 📂 **Tập Train:** [Google Drive - split_data/train](https://drive.google.com/drive/folders/18jp-lYZM4WorLQxH2CHGdPBjyMOYjAJG?usp=drive_link)
   * 📂 **Tập Val:** [Google Drive - split_data/val](https://drive.google.com/drive/folders/11L5txIHnHls-vJzTiVNLYhlzNJMvGazp?usp=drive_link)
   * 📂 **Tập Test:** [Google Drive - split_data/test](https://drive.google.com/drive/folders/1GBJ9aoDJ_ZmgnHg2inM8RtAjRS3-wKZ0?usp=drive_link)
+* 📥 **Thư mục Dữ liệu chuẩn hóa hoàn chỉnh (`data/final/`):**  
+  👉 [Google Drive - data/final](https://drive.google.com/drive/folders/1uiDts7iwxn7tMov9yzjnNzMTQCEBjT_Q?usp=drive_link)
+  * Thư mục chuẩn bị sẵn sàng cho huấn luyện mô hình Teacher & Student, bao gồm các thành phần:
+    * 📂 **`train/`**: Tập huấn luyện đã xử lý (`rgb/`, `sound/`, `thermal/`, `multispectral/`, `durian_characteristics_clean.csv`).
+    * 📂 **`valid/`**: Tập kiểm định đã xử lý.
+    * 📂 **`test/`**: Tập kiểm thử độc lập đã xử lý.
+    * 📄 **`final_multimodal_manifest.csv`**: Bảng dữ liệu tổng hợp 189 quả cho CMKD kèm cờ zero-masking và kiểm soát chống rò rỉ (Zero Leakage).
+    * 📦 **`sensor_preprocessor.joblib`**: Preprocessor artifact đã fit cho cảm biến/bảng số liệu.
 
 > **Lưu ý:** Sau khi tải về máy cá nhân, bạn chỉ cần bố trí và giải nén đúng theo cấu trúc thư mục chuẩn dưới đây để toàn bộ mã nguồn có thể tự động nhận diện dữ liệu.
 
@@ -137,6 +145,31 @@ data/
         │   ├── durian_004_Immature_A_Unripe_COMBINED.tif
         │   └── ...
         └── durian_characteristics_cleaned.csv   # Bảng đặc tính 29 dòng của tập Test
+│
+└── final/                                       # Dữ liệu sạch chuẩn hóa hoàn chỉnh (Multi-Modal Final Dataset)
+    ├── final_multimodal_manifest.csv            # Manifest tổng hợp 189 quả kèm cờ zero-masking
+    ├── sensor_preprocessor.joblib               # Preprocessor artifact đã fit trên tập Train
+    │
+    ├── train/                                   # Tập huấn luyện chuẩn hóa
+    │   ├── rgb/                                 # Ảnh RGB resize 512px + CLAHE kênh L
+    │   ├── sound/                               # Âm thanh gõ 48 kHz sạch
+    │   ├── thermal/                             # Ma trận nhiệt đã chuẩn hóa tên
+    │   ├── multispectral/                       # Ảnh đa phổ đã chuẩn hóa tên
+    │   └── durian_characteristics_clean.csv     # Bảng đặc tính 132 quả sạch (0 NaN, clipped outliers)
+    │
+    ├── valid/                                   # Tập kiểm định chuẩn hóa
+    │   ├── rgb/
+    │   ├── sound/
+    │   ├── thermal/
+    │   ├── multispectral/
+    │   └── durian_characteristics_clean.csv     # Bảng đặc tính 28 quả sạch (0 NaN)
+    │
+    └── test/                                    # Tập kiểm thử độc lập chuẩn hóa
+        ├── rgb/
+        ├── sound/
+        ├── thermal/
+        ├── multispectral/
+        └── durian_characteristics_clean.csv     # Bảng đặc tính 29 quả sạch (0 NaN)
 ```
 
 ---
