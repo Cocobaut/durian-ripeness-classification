@@ -1,0 +1,6 @@
+Tập huấn luyện (Train),Tập kiểm thử (Test),Accuracy,Macro-F1,Độ sụt giảm F1 (Domain Gap)
+Android (194 file),Android (In-domain),0.887,0.835,0.000 (Mốc cơ sở)
+Android (194 file),iPhone (Cross-device),0.814,0.762,-0.073 (-8.7%)
+iPhone (195 file),iPhone (In-domain),0.871,0.819,0.000 (Mốc cơ sở)
+iPhone (195 file),Android (Cross-device),0.825,0.775,-0.044 (-5.4%)
+Hỗn hợp Cả hai (389 file),Cả hai (Khuyến nghị cho CMKD),0.875,0.824,Tối ưu nhất (Bất biến thiết bị)
