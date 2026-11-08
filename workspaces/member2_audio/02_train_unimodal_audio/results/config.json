@@ -1,0 +1,57 @@
+{
+  "data_dir": "D:\\vscode_py\\durian-ripeness-classification\\data\\final",
+  "results_dir": "D:\\vscode_py\\durian-ripeness-classification\\workspaces\\member2_audio\\02_train_unimodal_audio\\results",
+  "ckpt_dir": "D:\\vscode_py\\durian-ripeness-classification\\checkpoints\\unimodal",
+  "epochs": 80,
+  "batch_size": 32,
+  "lr": 0.001,
+  "weight_decay": 0.001,
+  "warmup_epochs": 3,
+  "patience": 15,
+  "repeats": 4,
+  "mixup_alpha": 0.4,
+  "mixup_prob": 0.5,
+  "label_smoothing": 0.05,
+  "head_dropout": 0.3,
+  "no_class_weights": false,
+  "amp": null,
+  "num_workers": 0,
+  "device": "auto",
+  "seed": 42,
+  "eval_test": true,
+  "smoke": false,
+  "model_name": "audio_resnet18_scratch",
+  "device_used": "cuda",
+  "amp_used": true,
+  "class_order": [
+    "Unripe",
+    "Ripe",
+    "Overripe"
+  ],
+  "input_shape": [
+    1,
+    64,
+    306
+  ],
+  "preprocessor": {
+    "target_sr": 16000,
+    "n_knocks": 6,
+    "knock_duration": 0.5,
+    "n_mels": 64,
+    "n_fft": 1024,
+    "win_length": 400,
+    "hop_length": 160,
+    "fmin": 50.0,
+    "fmax": 8000.0
+  },
+  "class_weights": [
+    0.688034176826477,
+    1.0320513248443604,
+    1.7311828136444092
+  ],
+  "n_files": {
+    "train": 161,
+    "val": 39,
+    "test": 38
+  }
+}

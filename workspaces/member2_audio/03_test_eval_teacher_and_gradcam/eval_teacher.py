@@ -38,13 +38,14 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from matplotlib.backends.backend_agg import FigureCanvasAgg
+from matplotlib.figure import Figure
 from torch.utils.data import DataLoader, Dataset
 
 # Cấu hình logging phục vụ theo dõi quá trình đánh giá
@@ -67,6 +68,10 @@ NUM_CLASSES = len(CLASS_ORDER)
 # ------------------------------------------------------------------------------
 # 2. CẤU HÌNH ĐÁNH GIÁ TEACHER MODEL (DATACLASS CONFIG)
 # ------------------------------------------------------------------------------
+INPUT_MODES = ("multimodal", "audio", "vision", "sensor")
+ABLATION_MODALITIES = ("audio", "sensor", "vision")
+
+
 @dataclass
 class TeacherEvaluatorConfig:
     """Cấu hình tham số cho quy trình đánh giá mô hình Multi-Modal Teacher và Grad-CAM.
@@ -105,6 +110,20 @@ class TeacherEvaluatorConfig:
     # Chiến lược tổng hợp kết quả nhiều góc/nhiều tiếng gõ về cấp độ quả ('mean_prob' hoặc 'majority_vote')
     fruit_aggregation_strategy: str = "mean_prob"
 
+    # [BỔ SUNG] Chế độ đầu vào của mô hình cần đánh giá:
+    # - "multimodal": batch = (img, audio, sensor, label, fruit_id[, extra]) và gọi model(images, audios, sensors)
+    # - "audio" / "vision" / "sensor": batch = (x, label, fruit_id[, extra]) hoặc dict {x, label, fruit_id, ...}, gọi model(x)
+    input_mode: str = "multimodal"
+
+    # [BỔ SUNG] Tên tập dữ liệu đang chấm ("val", "test", ...) dùng làm tiền tố tên file kết quả
+    split_name: str = "test"
+
+    # [BỔ SUNG] Tên mô hình ghi vào bảng metrics (để ghép bảng so sánh giữa các nhánh)
+    model_name: str = "teacher"
+
+    # [BỔ SUNG] Số bin khi tính Expected Calibration Error
+    ece_bins: int = 15
+
 
 # ------------------------------------------------------------------------------
 # 3. CLASS CHÍNH: ĐÁNH GIÁ MÔ HÌNH TEACHER (TEACHER EVALUATOR)
@@ -121,7 +140,20 @@ class TeacherEvaluator:
     4. Đánh giá tính đóng góp của từng phương thức qua kỹ thuật Zero-masking / Modality Ablation:
        Đo lường mức độ sụt giảm hiệu năng khi mất nhánh Âm thanh, Cảm biến hoặc Thị giác.
     5. Xuất báo cáo chi tiết ra file CSV, Markdown và trực quan hóa ma trận nhầm lẫn.
+
+    Ngoài Teacher, class cũng chấm được mô hình ĐƠN phương thức (vd nhánh âm thanh Tuần 2)
+    bằng cách đặt `config.input_mode = "audio"` (bỏ qua bước ablation).
     """
+
+    # Tên khóa được chấp nhận khi batch là dict
+    _KEYS = {
+        "image": ("image", "images", "img", "rgb"),
+        "audio": ("audio", "audios", "mel", "audio_mel"),
+        "sensor": ("sensor", "sensors", "tabular"),
+        "x": ("x", "input", "inputs"),
+        "label": ("label", "labels", "y", "target"),
+        "fruit_id": ("fruit_id", "fruit_ids"),
+    }
 
     def __init__(
         self,
@@ -136,17 +168,99 @@ class TeacherEvaluator:
             model: Mô hình Multi-Modal Teacher đã khởi tạo (nếu None sẽ tự nạp từ checkpoint).
             test_loader: PyTorch DataLoader của tập kiểm thử Test.
         """
+        if config.input_mode not in INPUT_MODES:
+            raise ValueError(f"input_mode phải thuộc {INPUT_MODES}, nhận được: {config.input_mode!r}")
         self.config = config
         self.device = torch.device(config.device)
         self.output_dir = Path(config.output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
         self.model = model
+        if self.model is not None:
+            self.model.to(self.device)
         self.test_loader = test_loader
 
-        logger.info(f"Khởi tạo TeacherEvaluator trên thiết bị: {self.device}")
+        logger.info(f"Khởi tạo TeacherEvaluator trên thiết bị: {self.device} (input_mode={config.input_mode})")
         logger.info(f"Kết quả đánh giá sẽ được lưu tại: {self.output_dir}")
 
+    # ------------------------------------------------------------------
+    # Tiện ích nội bộ
+    # ------------------------------------------------------------------
+    def _file_prefix(self, split_name: Optional[str] = None) -> str:
+        name = self.config.split_name if split_name is None else split_name
+        return f"{name}_" if name else ""
+
+    @staticmethod
+    def _to_list(value: Any, n: int) -> List[Any]:
+        """Chuyển tensor / ndarray / list / scalar thành list Python độ dài n."""
+        if isinstance(value, torch.Tensor):
+            value = value.detach().cpu()
+            value = value.tolist() if value.ndim > 0 else [value.item()] * n
+        elif isinstance(value, np.ndarray):
+            value = value.tolist()
+        elif isinstance(value, (str, int, float)) or value is None:
+            value = [value] * n
+        value = list(value)
+        if len(value) != n:
+            raise ValueError(f"Độ dài trường phụ ({len(value)}) khác batch size ({n}).")
+        return value
+
+    @classmethod
+    def _pick(cls, batch: Dict[str, Any], name: str) -> Any:
+        for key in cls._KEYS[name]:
+            if key in batch:
+                return batch[key]
+        return None
+
+    def _unpack_batch(self, batch: Any) -> Tuple[Tuple[torch.Tensor, ...], torch.Tensor, Any, Dict[str, Any]]:
+        """Tách batch thành (inputs, labels, fruit_ids, extras) theo `config.input_mode`."""
+        multimodal = self.config.input_mode == "multimodal"
+        extras: Dict[str, Any] = {}
+        if isinstance(batch, dict):
+            if multimodal:
+                inputs = tuple(self._pick(batch, k) for k in ("image", "audio", "sensor"))
+            else:
+                x = self._pick(batch, "x")
+                if x is None:
+                    x = self._pick(batch, self.config.input_mode)
+                inputs = (x,)
+            labels, fruit_ids = self._pick(batch, "label"), self._pick(batch, "fruit_id")
+            used = {k for names in self._KEYS.values() for k in names}
+            extras = {k: v for k, v in batch.items() if k not in used}
+        elif isinstance(batch, (list, tuple)):
+            n_in = 3 if multimodal else 1
+            if len(batch) < n_in + 2:
+                raise ValueError(
+                    f"Batch dạng tuple cần ít nhất {n_in + 2} phần tử cho input_mode={self.config.input_mode!r}, "
+                    f"nhận được {len(batch)}."
+                )
+            inputs = tuple(batch[:n_in])
+            labels, fruit_ids = batch[n_in], batch[n_in + 1]
+            for i, extra in enumerate(batch[n_in + 2:]):
+                if isinstance(extra, dict):
+                    extras.update(extra)
+                else:
+                    extras[f"extra_{i}"] = extra
+        else:
+            raise TypeError(f"Không hỗ trợ kiểu batch: {type(batch)}")
+        if labels is None or fruit_ids is None or any(t is None for t in inputs):
+            raise ValueError("Batch thiếu input, label hoặc fruit_id.")
+        return inputs, labels, fruit_ids, extras
+
+    @staticmethod
+    def _extract_logits(output: Any) -> torch.Tensor:
+        """Lấy logits từ output của model: tensor, (logits, features) hoặc dict có khóa 'logits'."""
+        if isinstance(output, torch.Tensor):
+            return output
+        if isinstance(output, (list, tuple)) and len(output) > 0:
+            return output[0]
+        if isinstance(output, dict) and "logits" in output:
+            return output["logits"]
+        raise TypeError(f"Không lấy được logits từ output kiểu {type(output)}")
+
+    # ------------------------------------------------------------------
+    # 3.1. Nạp mô hình
+    # ------------------------------------------------------------------
     def load_teacher_model(self, checkpoint_path: Optional[str] = None) -> nn.Module:
         """Tải mô hình Teacher và load state_dict từ đường dẫn checkpoint.
 
@@ -160,6 +274,10 @@ class TeacherEvaluator:
         5. Gọi `model.load_state_dict(checkpoint['model_state_dict'])`.
         6. Chuyển mô hình sang chế độ đánh giá `model.eval()` và đóng băng gradient (`requires_grad = False`).
 
+        Ghi chú triển khai: kiến trúc Teacher do Lead định nghĩa ở Tuần 3, nên hàm này KHÔNG tự đoán
+        kiến trúc. Hãy truyền instance mô hình qua `TeacherEvaluator(config, model=...)`; hàm sẽ nạp
+        trọng số vào instance đó. Checkpoint có thể là state_dict thuần hoặc dict có khóa 'model_state_dict'.
+
         Args:
             checkpoint_path: Đường dẫn tới file .pth (nếu None sẽ lấy từ self.config).
 
@@ -169,11 +287,37 @@ class TeacherEvaluator:
         ckpt_path = checkpoint_path or self.config.teacher_checkpoint_path
         logger.info(f"Bắt đầu load trọng số Teacher từ: {ckpt_path}")
 
-        # TODO [Member 2]: Hiện thực hóa việc load model và weights tại đây
-        raise NotImplementedError(
-            "TODO [Member 2]: Hãy hoàn thành hàm load_teacher_model() theo hướng dẫn trong docstring!"
-        )
+        if self.model is None:
+            raise RuntimeError(
+                "Chưa có instance mô hình. Hãy khởi tạo kiến trúc (vd MultiModalTeacher của Lead) rồi truyền vào "
+                "TeacherEvaluator(config, model=model) trước khi gọi load_teacher_model()."
+            )
+        if not os.path.isfile(ckpt_path):
+            raise FileNotFoundError(f"Không tìm thấy checkpoint: {ckpt_path}")
 
+        checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
+        state_dict = checkpoint
+        if isinstance(checkpoint, dict):
+            for key in ("model_state_dict", "state_dict", "model"):
+                if key in checkpoint and isinstance(checkpoint[key], dict):
+                    state_dict = checkpoint[key]
+                    break
+        state_dict = {(k[7:] if k.startswith("module.") else k): v for k, v in state_dict.items()}
+        missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
+        if missing or unexpected:
+            raise RuntimeError(
+                f"State dict không khớp kiến trúc: thiếu {len(missing)} khóa (vd {missing[:3]}), "
+                f"thừa {len(unexpected)} khóa (vd {unexpected[:3]})."
+            )
+        self.model.to(self.device).eval()
+        for param in self.model.parameters():
+            param.requires_grad = False
+        logger.info("Nạp trọng số thành công.")
+        return self.model
+
+    # ------------------------------------------------------------------
+    # 3.2. Suy luận cấp độ sample
+    # ------------------------------------------------------------------
     def evaluate_sample_level(
         self,
         test_loader: Optional[DataLoader] = None,
@@ -185,38 +329,78 @@ class TeacherEvaluator:
         nhiều file ghi âm tiếng gõ (Android, iPhone) và các thông số cảm biến. Mỗi tổ hợp nạp
         vào mạng là một sample.
 
-        Hướng dẫn thực hiện cho Member 2 (TODO):
-        ---------------------------------------------------------
-        1. Lấy dataloader (nếu None thì lấy `self.test_loader`).
-        2. Đặt `self.model.eval()`.
-        3. Sử dụng context `torch.no_grad():` để tránh tốn bộ nhớ VRAM.
-        4. Lặp qua từng batch: `for batch in test_loader:`:
-           - Trích xuất: `images, audios, sensors, labels, fruit_ids, ...`
-           - Chuyển tensors lên thiết bị `self.device`.
-           - Nếu `mask_modality` được chỉ định (để ablation study):
-             * mask_modality == 'audio': gán `audios = torch.zeros_like(audios)`
-             * mask_modality == 'sensor': gán `sensors = torch.zeros_like(sensors)`
-             * mask_modality == 'vision': gán `images = torch.zeros_like(images)`
-           - Truyền qua Teacher Model: `logits, f_mm = self.model(images, audios, sensors)`
-           - Tính xác suất Softmax: `probs = F.softmax(logits, dim=-1)`
-           - Lấy nhãn dự đoán: `preds = torch.argmax(probs, dim=-1)`
-        5. Thu thập toàn bộ kết quả vào một DataFrame chứa các cột:
-           `['fruit_id', 'camera_angle', 'true_label', 'pred_label', 'prob_unripe', 'prob_ripe', 'prob_overripe', 'is_correct']`.
+        Batch được chấp nhận:
+        - input_mode="multimodal": `(images, audios, sensors, labels, fruit_ids[, extra...])` hoặc dict.
+        - input_mode đơn phương thức: `(x, labels, fruit_ids[, extra...])` hoặc dict `{x, label, fruit_id, ...}`.
+        Các trường phụ (vd `device`, `camera_angle`, `file`) được đưa thành cột trong DataFrame.
 
         Args:
             test_loader: Dataloader tập kiểm thử.
             mask_modality: Tên nhánh cần zero-mask để thử nghiệm độ bền vững ('audio', 'sensor', 'vision' hoặc None).
 
         Returns:
-            pd.DataFrame: Bảng kết quả dự đoán chi tiết từng sample.
+            pd.DataFrame: Bảng kết quả dự đoán chi tiết từng sample, gồm các cột
+            `['fruit_id', 'camera_angle', 'true_label', 'pred_label', 'prob_unripe', 'prob_ripe',
+            'prob_overripe', 'is_correct', 'y_true', 'y_pred']` cùng các cột phụ.
         """
         logger.info(f"Bắt đầu đánh giá cấp độ sample (mask_modality={mask_modality})...")
+        loader = test_loader or self.test_loader
+        if loader is None:
+            raise ValueError("Chưa có DataLoader để đánh giá.")
+        if self.model is None:
+            raise RuntimeError("Chưa có mô hình để đánh giá.")
+        if mask_modality is not None and mask_modality not in ABLATION_MODALITIES:
+            raise ValueError(f"mask_modality phải thuộc {ABLATION_MODALITIES} hoặc None.")
 
-        # TODO [Member 2]: Hiện thực hóa vòng lặp suy luận trên Test DataLoader
-        raise NotImplementedError(
-            "TODO [Member 2]: Hãy hiện thực hóa hàm evaluate_sample_level() theo hướng dẫn trong docstring!"
-        )
+        multimodal = self.config.input_mode == "multimodal"
+        self.model.eval()
+        rows: List[Dict[str, Any]] = []
+        with torch.no_grad():
+            for batch in loader:
+                inputs, labels, fruit_ids, extras = self._unpack_batch(batch)
+                inputs = [t.to(self.device, non_blocking=True).float() for t in inputs]
+                if mask_modality is not None:
+                    if multimodal:
+                        idx = {"vision": 0, "audio": 1, "sensor": 2}[mask_modality]
+                        inputs[idx] = torch.zeros_like(inputs[idx])
+                    elif mask_modality == self.config.input_mode:
+                        inputs[0] = torch.zeros_like(inputs[0])
 
+                logits = self._extract_logits(self.model(*inputs)).float()
+                probs = F.softmax(logits, dim=-1).cpu().numpy()
+                preds = probs.argmax(axis=1)
+
+                n = probs.shape[0]
+                y_true = self._to_list(labels, n)
+                fids = self._to_list(fruit_ids, n)
+                extra_lists = {k: self._to_list(v, n) for k, v in extras.items()}
+                for i in range(n):
+                    row = {
+                        "fruit_id": fids[i],
+                        "camera_angle": extra_lists.get("camera_angle", [""] * n)[i],
+                        "true_label": IDX_TO_LABEL[int(y_true[i])],
+                        "pred_label": IDX_TO_LABEL[int(preds[i])],
+                        "prob_unripe": float(probs[i, 0]),
+                        "prob_ripe": float(probs[i, 1]),
+                        "prob_overripe": float(probs[i, 2]),
+                        "is_correct": bool(int(y_true[i]) == int(preds[i])),
+                        "y_true": int(y_true[i]),
+                        "y_pred": int(preds[i]),
+                    }
+                    for k, v in extra_lists.items():
+                        if k != "camera_angle":
+                            row[k] = v[i]
+                    rows.append(row)
+
+        sample_df = pd.DataFrame(rows)
+        if sample_df.empty:
+            raise ValueError("DataLoader không có mẫu nào.")
+        logger.info(f"Đã suy luận {len(sample_df)} sample, accuracy = {sample_df['is_correct'].mean():.4f}")
+        return sample_df
+
+    # ------------------------------------------------------------------
+    # 3.3. Tổng hợp cấp độ quả
+    # ------------------------------------------------------------------
     def evaluate_fruit_level(
         self,
         sample_df: pd.DataFrame,
@@ -228,34 +412,58 @@ class TeacherEvaluator:
         thay vì từng ảnh chụp đơn lẻ. Do đó, đánh giá cấp độ quả (Fruit-level) phản ánh độ chính
         xác thực tế của toàn hệ thống.
 
-        Hướng dẫn thực hiện cho Member 2 (TODO):
-        ---------------------------------------------------------
-        1. Nhóm DataFrame theo `fruit_id`: `grouped = sample_df.groupby('fruit_id')`.
-        2. Áp dụng chiến lược tổng hợp (Aggregation Strategy):
-           - 'mean_prob' (Khuyến nghị): Tính trung bình vector xác suất Softmax của toàn bộ các mẫu
-             thuộc về quả đó: $P(c|fruit) = \\frac{1}{K} \\sum_{k=1}^K P(c|sample_k)$, sau đó
-             chọn nhãn có xác suất trung bình cao nhất $\\arg\\max$.
-           - 'majority_vote': Lấy nhãn xuất hiện nhiều nhất trong các dự đoán thành phần của quả.
-             Nếu hòa phiếu, ưu tiên nhãn có tổng xác suất cao hơn.
-        3. Trích xuất nhãn thực tế duy nhất của quả (`true_label`).
-        4. Trả về DataFrame cấp độ quả gồm:
-           `['fruit_id', 'true_label', 'pred_label', 'prob_unripe_mean', 'prob_ripe_mean', 'prob_overripe_mean', 'is_correct']`.
+        Chiến lược:
+        - 'mean_prob' (khuyến nghị): trung bình vector xác suất Softmax của các sample thuộc quả, chọn argmax.
+        - 'majority_vote': nhãn xuất hiện nhiều nhất; hòa phiếu thì chọn nhãn có tổng xác suất cao hơn.
 
         Args:
             sample_df: Bảng kết quả cấp độ sample từ hàm `evaluate_sample_level()`.
             strategy: Chiến lược tổng hợp ('mean_prob' hoặc 'majority_vote').
 
         Returns:
-            pd.DataFrame: Bảng dự đoán hợp nhất cho từng quả sầu riêng độc lập.
+            pd.DataFrame: Bảng dự đoán hợp nhất cho từng quả gồm
+            `['fruit_id', 'true_label', 'pred_label', 'prob_unripe_mean', 'prob_ripe_mean',
+            'prob_overripe_mean', 'is_correct', 'n_samples', 'y_true', 'y_pred']`.
         """
         agg_strategy = strategy or self.config.fruit_aggregation_strategy
         logger.info(f"Tổng hợp kết quả cấp độ quả (fruit_id) theo chiến lược: {agg_strategy}...")
+        if agg_strategy not in ("mean_prob", "majority_vote"):
+            raise ValueError("strategy phải là 'mean_prob' hoặc 'majority_vote'.")
 
-        # TODO [Member 2]: Hiện thực hóa hàm tổng hợp cấp độ quả tại đây
-        raise NotImplementedError(
-            "TODO [Member 2]: Hãy hiện thực hóa hàm evaluate_fruit_level() theo hướng dẫn trong docstring!"
-        )
+        prob_cols = ["prob_unripe", "prob_ripe", "prob_overripe"]
+        rows = []
+        for fruit_id, group in sample_df.groupby("fruit_id", sort=True):
+            true_labels = group["true_label"].unique()
+            if len(true_labels) > 1:
+                logger.warning(f"Quả {fruit_id} có nhiều nhãn thật {list(true_labels)}; dùng nhãn xuất hiện nhiều nhất.")
+            true_label = group["true_label"].mode().iloc[0]
+            mean_probs = group[prob_cols].mean().to_numpy()
+            if agg_strategy == "mean_prob":
+                pred_idx = int(mean_probs.argmax())
+            else:
+                votes = np.bincount(group["pred_label"].map(LABEL_TO_IDX).to_numpy(), minlength=NUM_CLASSES)
+                candidates = np.flatnonzero(votes == votes.max())
+                sums = group[prob_cols].sum().to_numpy()
+                pred_idx = int(candidates[np.argmax(sums[candidates])])
+            rows.append({
+                "fruit_id": fruit_id,
+                "true_label": true_label,
+                "pred_label": IDX_TO_LABEL[pred_idx],
+                "prob_unripe_mean": float(mean_probs[0]),
+                "prob_ripe_mean": float(mean_probs[1]),
+                "prob_overripe_mean": float(mean_probs[2]),
+                "is_correct": bool(true_label == IDX_TO_LABEL[pred_idx]),
+                "n_samples": int(len(group)),
+                "y_true": LABEL_TO_IDX[true_label],
+                "y_pred": pred_idx,
+            })
+        fruit_df = pd.DataFrame(rows)
+        logger.info(f"Đã tổng hợp {len(fruit_df)} quả, accuracy cấp quả = {fruit_df['is_correct'].mean():.4f}")
+        return fruit_df
 
+    # ------------------------------------------------------------------
+    # 3.4. Metrics
+    # ------------------------------------------------------------------
     def compute_metrics(
         self,
         y_true: Sequence[int],
@@ -265,26 +473,14 @@ class TeacherEvaluator:
     ) -> Dict[str, float]:
         """Tính toán toàn diện các chỉ số đánh giá phân loại (Classification Metrics).
 
-        GỢI Ý MỘT SỐ METRIC CỐT LÕI (Member 2 tham khảo):
-        ---------------------------------------------------------
-        1. Accuracy: Tỷ lệ dự đoán đúng trên toàn bộ tập dữ liệu.
-        2. Balanced Accuracy: Trung bình cộng Recall của từng lớp (rất quan trọng khi phân bố lớp lệch).
-        3. Macro-F1 (Metric trọng tâm của đề tài): Đánh giá công bằng hiệu năng giữa 3 lớp (Unripe, Ripe, Overripe).
-        4. Weighted-F1: F1 có trọng số theo số lượng mẫu của từng lớp.
-        5. Per-class Precision, Recall, F1:
-           - F1-Unripe: Độ chính xác phát hiện sầu riêng non / chưa chín (tránh cắt non gây lỗ).
-           - F1-Ripe: Độ chính xác nhận biết quả chín tới đạt chuẩn xuất bán.
-           - F1-Overripe: Độ chính xác phát hiện quả chín quá / nứt vỏ / lên men.
-        6. ROC-AUC (Macro One-vs-Rest): Đo lường khả năng phân tách giữa các phân phối xác suất.
-        7. PR-AUC (Average Precision Macro): Thích hợp khi đánh giá các lớp thiểu số.
-        8. Expected Calibration Error (ECE): Đo lường độ tin cậy của xác suất (Soft Targets) do Teacher sinh ra,
-           đảm bảo Teacher cung cấp "Soft Targets" đáng tin cậy cho Student trong quá trình chưng cất.
-
-        >>> LƯU Ý ĐẶC BIỆT DÀNH CHO MEMBER 2:
-        >>> Các metric trên đây chỉ là gợi ý tham khảo.
-        >>> Thành viên phụ trách cần TỰ TÌM THÊM các metric khác phù hợp với bài toán
-        >>> và yêu cầu báo cáo học thuật (ví dụ: Cohen's Kappa, Matthew's Correlation Coefficient - MCC,
-        >>> Brier Score, Log-Loss đa lớp, độ tin cậy nhiệt độ,...).
+        Metric được tính:
+        - Accuracy, Balanced Accuracy, Macro-F1 (metric trọng tâm), Weighted-F1,
+          Macro Precision / Macro Recall.
+        - Precision / Recall / F1 / Support cho từng lớp (Unripe, Ripe, Overripe).
+        - Cohen's Kappa, Matthews Correlation Coefficient (MCC).
+        - Khi có xác suất: ROC-AUC macro one-vs-rest, PR-AUC macro (Average Precision),
+          Log-loss đa lớp, Brier score đa lớp, Expected Calibration Error (ECE).
+        Metric không tính được (vd thiếu lớp trong y_true) trả về NaN kèm cảnh báo, không gây lỗi.
 
         Args:
             y_true: Mảng nhãn thực tế (dạng số nguyên 0, 1, 2).
@@ -295,13 +491,87 @@ class TeacherEvaluator:
         Returns:
             Dict[str, float]: Từ điển chứa tên metric và giá trị tương ứng.
         """
-        # TODO [Member 2]: Dùng sklearn.metrics (accuracy_score, f1_score, precision_recall_fscore_support,
-        # roc_auc_score, cohen_kappa_score...) để tính toán các chỉ số gợi ý trên
-        # VÀ TỰ TÌM THÊM CÁC METRIC KHÁC để hoàn thiện hàm này.
-        raise NotImplementedError(
-            "TODO [Member 2]: Hãy hoàn thành hàm compute_metrics() và bổ sung thêm metric tự tìm!"
+        from sklearn.metrics import (
+            accuracy_score, average_precision_score, balanced_accuracy_score, cohen_kappa_score,
+            f1_score, log_loss, matthews_corrcoef, precision_recall_fscore_support, roc_auc_score,
         )
+        import warnings
 
+        y_true = np.asarray(y_true, dtype=int)
+        y_pred = np.asarray(y_pred, dtype=int)
+        labels = list(range(NUM_CLASSES))
+        metrics: Dict[str, float] = {"n_samples": float(len(y_true))}
+
+        def safe(name: str, fn: Callable[[], float]) -> None:
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore")
+                    metrics[name] = float(fn())
+            except Exception as exc:  # metric không xác định trên dữ liệu này
+                logger.warning(f"Không tính được {prefix}{name}: {exc}")
+                metrics[name] = float("nan")
+
+        safe("accuracy", lambda: accuracy_score(y_true, y_pred))
+        safe("balanced_accuracy", lambda: balanced_accuracy_score(y_true, y_pred))
+        safe("macro_f1", lambda: f1_score(y_true, y_pred, labels=labels, average="macro", zero_division=0))
+        safe("weighted_f1", lambda: f1_score(y_true, y_pred, labels=labels, average="weighted", zero_division=0))
+        p, r, f, s = precision_recall_fscore_support(y_true, y_pred, labels=labels, zero_division=0)
+        metrics["macro_precision"] = float(np.mean(p))
+        metrics["macro_recall"] = float(np.mean(r))
+        for i, cls in enumerate(CLASS_ORDER):
+            key = cls.lower()
+            metrics[f"precision_{key}"] = float(p[i])
+            metrics[f"recall_{key}"] = float(r[i])
+            metrics[f"f1_{key}"] = float(f[i])
+            metrics[f"support_{key}"] = float(s[i])
+        safe("cohen_kappa", lambda: cohen_kappa_score(y_true, y_pred, labels=labels))
+        safe("mcc", lambda: matthews_corrcoef(y_true, y_pred))
+
+        if y_probs is not None:
+            probs = np.asarray(y_probs, dtype=float)
+            probs = probs / np.clip(probs.sum(axis=1, keepdims=True), 1e-12, None)
+            onehot = np.eye(NUM_CLASSES)[y_true]
+            present = [c for c in labels if onehot[:, c].any() and not onehot[:, c].all()]
+
+            def roc_auc() -> float:
+                if len(present) < NUM_CLASSES:
+                    raise ValueError(f"y_true chỉ có lớp {sorted(set(y_true.tolist()))}, ROC-AUC macro không xác định")
+                return roc_auc_score(y_true, probs, multi_class="ovr", average="macro", labels=labels)
+
+            def pr_auc() -> float:
+                if not present:
+                    raise ValueError("không có lớp nào có cả mẫu dương và âm")
+                return float(np.mean([average_precision_score(onehot[:, c], probs[:, c]) for c in present]))
+
+            safe("roc_auc_ovr_macro", roc_auc)
+            safe("pr_auc_macro", pr_auc)
+            safe("log_loss", lambda: log_loss(y_true, np.clip(probs, 1e-12, 1.0), labels=labels))
+            metrics["brier_score"] = float(np.mean(np.sum((probs - onehot) ** 2, axis=1)))
+            metrics["ece"] = self._expected_calibration_error(y_true, probs, self.config.ece_bins)
+
+        return {f"{prefix}{k}": v for k, v in metrics.items()}
+
+    @staticmethod
+    def _expected_calibration_error(y_true: np.ndarray, probs: np.ndarray, n_bins: int = 15) -> float:
+        """ECE theo độ tin cậy lớn nhất (top-label), chia đều [0, 1] thành n_bins."""
+        conf = probs.max(axis=1)
+        correct = (probs.argmax(axis=1) == y_true).astype(float)
+        edges = np.linspace(0.0, 1.0, n_bins + 1)
+        ece = 0.0
+        for lo, hi in zip(edges[:-1], edges[1:]):
+            mask = (conf > lo) & (conf <= hi) if lo > 0 else (conf >= lo) & (conf <= hi)
+            if mask.any():
+                ece += mask.mean() * abs(correct[mask].mean() - conf[mask].mean())
+        return float(ece)
+
+    def _level_metrics(self, df: pd.DataFrame, level: str) -> Dict[str, float]:
+        prob_cols = (["prob_unripe", "prob_ripe", "prob_overripe"] if level == "sample"
+                     else ["prob_unripe_mean", "prob_ripe_mean", "prob_overripe_mean"])
+        return self.compute_metrics(df["y_true"], df["y_pred"], df[prob_cols].to_numpy(), prefix=f"{level}_")
+
+    # ------------------------------------------------------------------
+    # 3.5. Ablation
+    # ------------------------------------------------------------------
     def evaluate_modality_ablation(
         self,
         test_loader: Optional[DataLoader] = None,
@@ -314,28 +584,39 @@ class TeacherEvaluator:
         3. w/o Sensor (Zero-masking nhánh cảm biến/bảng số liệu/nhiệt/đa phổ): Đo lường độ đóng góp của cảm biến.
         4. w/o Vision (Zero-masking nhánh ảnh RGB): Kiểm tra nếu "mù" thị giác thì Teacher phân loại ra sao.
 
-        Hướng dẫn thực hiện cho Member 2 (TODO):
-        ---------------------------------------------------------
-        1. Chạy `self.evaluate_sample_level()` lần lượt cho từng trường hợp:
-           - `mask_modality = None` (Full Teacher)
-           - `mask_modality = 'audio'`
-           - `mask_modality = 'sensor'`
-           - `mask_modality = 'vision'`
-        2. Với mỗi trường hợp, tổng hợp cấp độ quả bằng `self.evaluate_fruit_level()`.
-        3. Tính toán các chỉ số `compute_metrics()`.
-        4. Tính mức độ sụt giảm hiệu năng: $\\Delta F1 = F1_{Full} - F1_{masked}$.
-        5. Đóng gói kết quả thành bảng so sánh và lưu thành file CSV.
+        Chỉ chạy khi `config.input_mode == "multimodal"`; với mô hình đơn phương thức trả về dict rỗng.
+        Kết quả được lưu ra `<split>_ablation.csv`.
 
         Returns:
             Dict[str, Dict[str, float]]: Bảng đối chiếu hiệu năng giữa các cấu hình phương thức.
         """
         logger.info("Bắt đầu phân tích đóng góp phương thức (Modality Ablation Study)...")
+        if self.config.input_mode != "multimodal":
+            logger.info(f"Bỏ qua ablation vì mô hình đơn phương thức (input_mode={self.config.input_mode}).")
+            return {}
 
-        # TODO [Member 2]: Hiện thực hóa quy trình thử nghiệm Ablation Study
-        raise NotImplementedError(
-            "TODO [Member 2]: Hãy hiện thực hóa hàm evaluate_modality_ablation() theo hướng dẫn trong docstring!"
-        )
+        settings = {"full": None, "wo_audio": "audio", "wo_sensor": "sensor", "wo_vision": "vision"}
+        results: Dict[str, Dict[str, float]] = {}
+        for name, mask in settings.items():
+            sample_df = self.evaluate_sample_level(test_loader, mask_modality=mask)
+            fruit_df = self.evaluate_fruit_level(sample_df)
+            results[name] = {**self._level_metrics(sample_df, "sample"), **self._level_metrics(fruit_df, "fruit")}
 
+        full = results["full"]
+        for name, res in results.items():
+            for level in ("sample", "fruit"):
+                res[f"delta_{level}_macro_f1"] = full[f"{level}_macro_f1"] - res[f"{level}_macro_f1"]
+
+        table = pd.DataFrame(results).T
+        table.index.name = "setting"
+        path = self.output_dir / f"{self._file_prefix()}ablation.csv"
+        table.to_csv(path)
+        logger.info(f"Đã lưu bảng ablation: {path}")
+        return results
+
+    # ------------------------------------------------------------------
+    # 3.6. Confusion matrix
+    # ------------------------------------------------------------------
     def plot_confusion_matrix(
         self,
         y_true: Sequence[int],
@@ -346,44 +627,176 @@ class TeacherEvaluator:
     ) -> str:
         """Vẽ và lưu trữ biểu đồ nhiệt ma trận nhầm lẫn (Confusion Matrix Heatmap).
 
-        Hướng dẫn thực hiện cho Member 2 (TODO):
-        ---------------------------------------------------------
-        1. Tính ma trận nhầm lẫn qua `sklearn.metrics.confusion_matrix(y_true, y_pred)`.
-        2. Nếu `normalize=True`, chia từng hàng cho tổng của hàng để ra tỷ lệ phần trăm (Recall per class).
-        3. Sử dụng `seaborn.heatmap()` kết hợp matplotlib để hiển thị đẹp mắt:
-           - Trục X: Predicted Label (`Unripe`, `Ripe`, `Overripe`).
-           - Trục Y: True Label (`Unripe`, `Ripe`, `Overripe`).
-           - Hiển thị giá trị phần trăm và số lượng mẫu trong từng ô (`annot=True`).
-        4. Lưu biểu đồ vào `self.output_dir / save_name`.
+        - `normalize=True`: mỗi ô hiển thị tỷ lệ theo hàng (Recall từng lớp) kèm số lượng mẫu.
+        - `normalize=False`: hiển thị số lượng mẫu.
+        Trục X: nhãn dự đoán, trục Y: nhãn thật, theo thứ tự `CLASS_ORDER`.
 
         Returns:
             str: Đường dẫn file ảnh đã lưu.
         """
-        # TODO [Member 2]: Hiện thực hóa việc vẽ confusion matrix
-        raise NotImplementedError(
-            "TODO [Member 2]: Hãy hiện thực hóa hàm plot_confusion_matrix()!"
-        )
+        from sklearn.metrics import confusion_matrix
 
-    def run_full_evaluation_pipeline(self) -> Dict[str, Any]:
+        cm = confusion_matrix(np.asarray(y_true, dtype=int), np.asarray(y_pred, dtype=int),
+                              labels=list(range(NUM_CLASSES)))
+        if normalize:
+            row_sum = cm.sum(axis=1, keepdims=True)
+            values = np.divide(cm, row_sum, out=np.zeros_like(cm, dtype=float), where=row_sum > 0)
+            annot = np.array([[f"{values[i, j] * 100:.1f}%\n({cm[i, j]})" for j in range(NUM_CLASSES)]
+                              for i in range(NUM_CLASSES)])
+            fmt, vmax = "", 1.0
+        else:
+            values, annot, fmt, vmax = cm, True, "d", None
+
+        # Dùng Figure + canvas Agg (chỉ lưu PNG): không phụ thuộc backend Tk, không đổi backend toàn cục
+        fig = Figure(figsize=(6, 5))
+        FigureCanvasAgg(fig)
+        ax = fig.add_subplot()
+        sns.heatmap(values, annot=annot, fmt=fmt, cmap="Blues", vmin=0, vmax=vmax, cbar=normalize,
+                    xticklabels=CLASS_ORDER, yticklabels=CLASS_ORDER, ax=ax, annot_kws={"size": 12})
+        ax.set_xlabel("Predicted Label")
+        ax.set_ylabel("True Label")
+        ax.set_title(title, fontweight="bold")
+        fig.tight_layout()
+        path = self.output_dir / save_name
+        fig.savefig(path, dpi=150)
+        return str(path)
+
+    # ------------------------------------------------------------------
+    # 3.7. Pipeline
+    # ------------------------------------------------------------------
+    def run_full_evaluation_pipeline(
+        self,
+        test_loader: Optional[DataLoader] = None,
+        split_name: Optional[str] = None,
+        load_checkpoint: bool = False,
+    ) -> Dict[str, Any]:
         """Quy trình đánh giá toàn diện mô hình Teacher (End-to-End Evaluation Pipeline).
 
         Hàm điều phối chạy trọn vẹn toàn bộ các bước:
-        1. Load checkpoint Teacher model.
+        1. Load checkpoint Teacher model (khi `load_checkpoint=True`, hoặc khi chưa có model).
         2. Đánh giá cấp độ sample và cấp độ quả (Full Multi-Modal).
         3. Tính toán metrics tổng hợp (Sample-level & Fruit-level).
-        4. Chạy Ablation Study đo lường đóng góp của từng kênh (Audio / Sensor / Vision).
+        4. Chạy Ablation Study đo lường đóng góp của từng kênh (Audio / Sensor / Vision) — chỉ multimodal.
         5. Xuất báo cáo ma trận nhầm lẫn dạng biểu đồ.
         6. Lưu trữ tệp tổng hợp kết quả (JSON / CSV).
+
+        File đầu ra trong `output_dir` (tiền tố `<split>_`):
+        `sample_predictions.csv`, `fruit_predictions.csv`, `metrics.csv` (dạng dài: model, split, level,
+        metric, value), `metrics.json`, `metrics_by_<cột>.csv` (vd theo thiết bị), `ablation.csv`,
+        `cm_sample_counts.png`, `cm_sample_normalized.png`, `cm_fruit_counts.png`, `cm_fruit_normalized.png`, `eval.log`.
+
+        Args:
+            test_loader: DataLoader cần chấm (mặc định `self.test_loader`).
+            split_name: Tên tập ("val", "test"...) làm tiền tố file (mặc định `config.split_name`).
+            load_checkpoint: True để nạp trọng số từ `config.teacher_checkpoint_path` trước khi chấm.
 
         Returns:
             Dict[str, Any]: Từ điển tổng hợp toàn bộ kết quả thực nghiệm.
         """
-        logger.info("=== BẮT ĐẦU QUY TRÌNH ĐÁNH GIÁ TOÀN DIỆN TEACHER MODEL ===")
+        if split_name is not None:
+            self.config.split_name = split_name
+        prefix = self._file_prefix()
+        log_handler = logging.FileHandler(self.output_dir / f"{prefix}eval.log", mode="w", encoding="utf-8")
+        log_handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s"))
+        logger.addHandler(log_handler)
+        try:
+            logger.info("=== BẮT ĐẦU QUY TRÌNH ĐÁNH GIÁ TOÀN DIỆN TEACHER MODEL ===")
+            logger.info(f"model={self.config.model_name} | split={self.config.split_name} | "
+                        f"input_mode={self.config.input_mode} | strategy={self.config.fruit_aggregation_strategy}")
+            if self.model is None or load_checkpoint:
+                self.load_teacher_model()
 
-        # TODO [Member 2]: Điều phối thực thi tuần tự các phương thức đã xây dựng ở trên
-        raise NotImplementedError(
-            "TODO [Member 2]: Hãy hoàn thành pipeline điều phối trong run_full_evaluation_pipeline()!"
-        )
+            sample_df = self.evaluate_sample_level(test_loader)
+            fruit_df = self.evaluate_fruit_level(sample_df)
+            sample_df.to_csv(self.output_dir / f"{prefix}sample_predictions.csv", index=False)
+            fruit_df.to_csv(self.output_dir / f"{prefix}fruit_predictions.csv", index=False)
+
+            metrics = {**self._level_metrics(sample_df, "sample"), **self._level_metrics(fruit_df, "fruit")}
+            long_rows = []
+            for key, value in metrics.items():
+                level, metric = key.split("_", 1)
+                long_rows.append({"model": self.config.model_name, "split": self.config.split_name,
+                                  "level": level, "metric": metric, "value": value})
+            pd.DataFrame(long_rows).to_csv(self.output_dir / f"{prefix}metrics.csv", index=False)
+
+            # Metric tách theo cột phụ (vd thiết bị ghi âm, góc chụp)
+            by_group: Dict[str, Dict[str, Dict[str, float]]] = {}
+            for col in ("device", "camera_angle"):
+                if col in sample_df and sample_df[col].astype(str).str.len().gt(0).any() \
+                        and sample_df[col].nunique() > 1:
+                    group_res = {str(g): self._level_metrics(gdf, "sample")
+                                 for g, gdf in sample_df.groupby(col)}
+                    by_group[col] = group_res
+                    pd.DataFrame(group_res).T.rename_axis(col).to_csv(
+                        self.output_dir / f"{prefix}metrics_by_{col}.csv")
+
+            figures = {
+                "cm_sample_counts": self.plot_confusion_matrix(
+                    sample_df["y_true"], sample_df["y_pred"], f"{self.config.model_name} | {self.config.split_name} | sample",
+                    f"{prefix}cm_sample_counts.png", normalize=False),
+                "cm_sample_normalized": self.plot_confusion_matrix(
+                    sample_df["y_true"], sample_df["y_pred"], f"{self.config.model_name} | {self.config.split_name} | sample",
+                    f"{prefix}cm_sample_normalized.png", normalize=True),
+                "cm_fruit_counts": self.plot_confusion_matrix(
+                    fruit_df["y_true"], fruit_df["y_pred"], f"{self.config.model_name} | {self.config.split_name} | fruit",
+                    f"{prefix}cm_fruit_counts.png", normalize=False),
+                "cm_fruit_normalized": self.plot_confusion_matrix(
+                    fruit_df["y_true"], fruit_df["y_pred"], f"{self.config.model_name} | {self.config.split_name} | fruit",
+                    f"{prefix}cm_fruit_normalized.png", normalize=True),
+            }
+
+            ablation = self.evaluate_modality_ablation(test_loader)
+
+            results = {
+                "model": self.config.model_name,
+                "split": self.config.split_name,
+                "input_mode": self.config.input_mode,
+                "fruit_aggregation_strategy": self.config.fruit_aggregation_strategy,
+                "metrics": metrics,
+                "metrics_by_group": by_group,
+                "ablation": ablation,
+                "figures": figures,
+                "n_samples": int(len(sample_df)),
+                "n_fruits": int(len(fruit_df)),
+            }
+            with open(self.output_dir / f"{prefix}metrics.json", "w", encoding="utf-8") as f:
+                json.dump(results, f, ensure_ascii=False, indent=2, default=float)
+            logger.info(f"[{self.config.split_name}] sample Macro-F1 = {metrics['sample_macro_f1']:.4f} | "
+                        f"fruit Macro-F1 = {metrics['fruit_macro_f1']:.4f}")
+            logger.info("=== HOÀN TẤT ĐÁNH GIÁ ===")
+            return results
+        finally:
+            logger.removeHandler(log_handler)
+            log_handler.close()
+
+
+def evaluate(
+    model: nn.Module,
+    dataloader: DataLoader,
+    output_dir: Union[str, Path],
+    input_mode: str = "audio",
+    split_name: str = "test",
+    device: Optional[str] = None,
+    model_name: str = "model",
+    fruit_aggregation_strategy: str = "mean_prob",
+) -> Dict[str, Any]:
+    """Hàm tiện ích: chấm một mô hình trên một DataLoader và lưu toàn bộ kết quả vào `output_dir`.
+
+    Ví dụ (script train nhánh âm thanh Tuần 2):
+        from eval_teacher import evaluate
+        results = evaluate(model, val_loader, "results", input_mode="audio", split_name="val",
+                           model_name="audio_resnet18")
+    """
+    config = TeacherEvaluatorConfig(
+        output_dir=str(output_dir),
+        input_mode=input_mode,
+        split_name=split_name,
+        model_name=model_name,
+        fruit_aggregation_strategy=fruit_aggregation_strategy,
+        device=device or ("cuda" if torch.cuda.is_available() else "cpu"),
+    )
+    evaluator = TeacherEvaluator(config, model=model, test_loader=dataloader)
+    return evaluator.run_full_evaluation_pipeline()
 
 
 # ------------------------------------------------------------------------------
@@ -651,6 +1064,25 @@ def parse_args():
         help="Kích thước batch khi nạp dữ liệu",
     )
     parser.add_argument(
+        "--input-mode",
+        type=str,
+        default="multimodal",
+        choices=["multimodal", "audio", "vision", "sensor"],
+        help="Chế độ đầu vào của mô hình (multimodal cho Teacher, audio/vision/sensor cho mô hình đơn phương thức)",
+    )
+    parser.add_argument(
+        "--split-name",
+        type=str,
+        default="test",
+        help="Tên tập đang chấm (val/test), dùng làm tiền tố tên file kết quả",
+    )
+    parser.add_argument(
+        "--model-name",
+        type=str,
+        default="teacher",
+        help="Tên mô hình ghi vào bảng metrics",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
@@ -673,6 +1105,9 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         batch_size=args.batch_size,
         device=args.device,
+        input_mode=args.input_mode,
+        split_name=args.split_name,
+        model_name=args.model_name,
     )
 
     evaluator = TeacherEvaluator(config=config)
@@ -680,7 +1115,10 @@ if __name__ == "__main__":
     print(f"[INFO] File trọng số mục tiêu: {config.teacher_checkpoint_path}")
     print(f"[INFO] Kết quả sẽ được lưu tại: {config.output_dir}")
     print("\n[HƯỚNG DẪN THỰC THI]:")
-    print("1. Thành viên 2 cần hoàn thành các hàm có đánh dấu TODO trong các class.")
-    print("2. Đảm bảo file checkpoint mô hình Teacher đã được huấn luyện sẵn sàng.")
-    print("3. Chạy lệnh: python eval_teacher.py --checkpoint <path_to_model>")
+    print("1. Phần đánh giá (TeacherEvaluator) đã hoàn thiện; Grad-CAM và phân tích lỗi sẽ làm ở Tuần 4.")
+    print("2. Kiến trúc Teacher do Lead định nghĩa ở Tuần 3: khởi tạo model rồi dùng trong code Python:")
+    print("     from eval_teacher import TeacherEvaluator, TeacherEvaluatorConfig")
+    print("     ev = TeacherEvaluator(TeacherEvaluatorConfig(...), model=model, test_loader=loader)")
+    print("     ev.run_full_evaluation_pipeline(load_checkpoint=True)")
+    print("3. Mô hình đơn phương thức: from eval_teacher import evaluate; evaluate(model, loader, out_dir, input_mode='audio')")
 

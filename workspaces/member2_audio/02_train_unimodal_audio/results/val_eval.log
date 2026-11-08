@@ -1,0 +1,10 @@
+[2026-11-09 00:59:19,981] [INFO] === BẮT ĐẦU QUY TRÌNH ĐÁNH GIÁ TOÀN DIỆN TEACHER MODEL ===
+[2026-11-09 00:59:19,981] [INFO] model=audio_resnet18_scratch | split=val | input_mode=audio | strategy=mean_prob
+[2026-11-09 00:59:19,981] [INFO] Bắt đầu đánh giá cấp độ sample (mask_modality=None)...
+[2026-11-09 00:59:20,116] [INFO] Đã suy luận 39 sample, accuracy = 0.9744
+[2026-11-09 00:59:20,116] [INFO] Tổng hợp kết quả cấp độ quả (fruit_id) theo chiến lược: mean_prob...
+[2026-11-09 00:59:20,123] [INFO] Đã tổng hợp 22 quả, accuracy cấp quả = 0.9545
+[2026-11-09 00:59:20,446] [INFO] Bắt đầu phân tích đóng góp phương thức (Modality Ablation Study)...
+[2026-11-09 00:59:20,446] [INFO] Bỏ qua ablation vì mô hình đơn phương thức (input_mode=audio).
+[2026-11-09 00:59:20,446] [INFO] [val] sample Macro-F1 = 0.9663 | fruit Macro-F1 = 0.9434
+[2026-11-09 00:59:20,446] [INFO] === HOÀN TẤT ĐÁNH GIÁ ===
