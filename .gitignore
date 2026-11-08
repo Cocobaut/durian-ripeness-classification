@@ -11,10 +11,17 @@ __pycache__/
 # Data raw and scaler files (large files)
 data/raw/*
 !data/raw/.gitkeep
-data/*.joblib
+data/**/*.joblib
 
 data/split_data/*/dataset_clean_*/*
 !data/split_data/*/dataset_clean_*/.gitkeep
+
+# Final normalized dataset (media files are large; CSVs stay tracked)
+data/final/*/rgb/*
+data/final/*/sound/*
+data/final/*/thermal/*
+data/final/*/multispectral/*
+!data/final/*/*/.gitkeep
 
 # Jupyter Notebook checkpoints
 .ipynb_checkpoints/
