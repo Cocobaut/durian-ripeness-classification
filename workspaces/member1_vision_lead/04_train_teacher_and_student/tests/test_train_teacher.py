@@ -44,13 +44,35 @@ def test_classification_loss_and_weights():
     assert w.shape == (3,)
     assert w[2] > w[1] > w[0]
 
-    crit = DurianClassificationLoss(class_weights=w, label_smoothing=0.05)
+    # Test Cost-Sensitive Focal Loss
+    crit_cs = DurianClassificationLoss(
+        class_weights=w,
+        label_smoothing=0.05,
+        focal_gamma=2.0,
+        loss_type="cost_sensitive_focal",
+        cost_weight=0.5,
+    )
     logits = torch.randn(4, 3, requires_grad=True)
     targets = torch.tensor([0, 1, 2, 0])
-    loss = crit(logits, targets)
+    loss = crit_cs(logits, targets)
     loss.backward()
     assert loss.item() > 0
     assert logits.grad is not None
+
+    # Kiểm tra tính chất Cost-Sensitive: nhầm Overripe thành Unripe (cách 2 nấc) phải bị phạt nặng hơn nhầm thành Ripe (cách 1 nấc)
+    crit_pure_cost = DurianClassificationLoss(
+        class_weights=None,
+        label_smoothing=0.0,
+        focal_gamma=0.0,
+        loss_type="cost_sensitive_focal",
+        cost_weight=1.0,
+    )
+    target_overripe = torch.tensor([2])
+    logits_pred_unripe = torch.tensor([[10.0, 0.0, 0.0]])  # đoán Unripe khi thật là Overripe
+    logits_pred_ripe = torch.tensor([[0.0, 10.0, 0.0]])    # đoán Ripe khi thật là Overripe
+    loss_unripe = crit_pure_cost(logits_pred_unripe, target_overripe)
+    loss_ripe = crit_pure_cost(logits_pred_ripe, target_overripe)
+    assert loss_unripe > loss_ripe, "Nhầm Unripe <-> Overripe phải có loss cao hơn nhầm Ripe <-> Overripe"
 
 
 def test_sensor_pipeline_on_real_manifest():

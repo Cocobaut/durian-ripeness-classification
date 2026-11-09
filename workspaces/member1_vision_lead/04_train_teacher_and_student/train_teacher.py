@@ -107,11 +107,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--patience", type=int, default=8, help="Early stopping (chỉ tính ở Pha 2)")
     p.add_argument("--grad-clip", type=float, default=1.0)
     # Loss & regularization
+    p.add_argument("--loss-type", default="cost_sensitive_focal",
+                   choices=["cost_sensitive_focal", "focal", "ce"],
+                   help="Hàm mất mát: cost_sensitive_focal (mặc định), focal, hoặc ce")
     p.add_argument("--label-smoothing", type=float, default=0.05)
-    p.add_argument("--focal-gamma", type=float, default=0.0, help="> 0 để dùng Focal Loss thay CE")
+    p.add_argument("--focal-gamma", type=float, default=2.0, help="Số mũ gamma cho Focal Loss (mặc định 2.0)")
+    p.add_argument("--cost-weight", type=float, default=0.5,
+                   help="Trọng số phạt chi phí sai lầm thứ tự (Ordinal Cost Weight)")
     p.add_argument("--no-class-weights", action="store_true")
     p.add_argument("--modality-dropout", type=float, default=0.15)
     p.add_argument("--fusion-dropout", type=float, default=0.3)
+    p.add_argument("--fusion-type", default="cross_attention",
+                   choices=["cross_attention", "gated_concat"],
+                   help="Cơ chế hợp nhất: cross_attention (Transformer) hoặc gated_concat")
+    p.add_argument("--num-attn-heads", type=int, default=4, help="Số attention heads cho Cross-Attention")
+    p.add_argument("--num-attn-layers", type=int, default=1, help="Số layer Transformer Cross-Attention")
     p.add_argument("--proj-dim", type=int, default=256)
     p.add_argument("--latent-dim-mm", type=int, default=256)
     # Chọn mô hình tốt nhất
@@ -368,6 +378,9 @@ def main() -> None:
     cfg = TeacherConfig(
         proj_dim=args.proj_dim, latent_dim_mm=args.latent_dim_mm, fusion_dropout=args.fusion_dropout,
         modality_dropout=args.modality_dropout,
+        fusion_type=args.fusion_type,
+        num_attn_heads=args.num_attn_heads,
+        num_attn_layers=args.num_attn_layers,
         sensor_input_dim=int(sensor_meta.get("input_dim", 21)),
         sensor_hidden_dims=list(sensor_meta.get("hidden_dims", [64, 48])),
         sensor_latent_dim=int(sensor_meta.get("latent_dim", 32)),
@@ -378,14 +391,20 @@ def main() -> None:
     model.load_unimodal_backbones(vision_ckpt, audio_ckpt, sensor_ckpt)
     model.to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    logger.info(f"Teacher: {n_params / 1e6:.1f}M tham số | f_mm = {cfg.latent_dim_mm} chiều")
+    logger.info(f"Teacher: {n_params / 1e6:.1f}M tham số ({args.fusion_type}) | f_mm = {cfg.latent_dim_mm} chiều")
 
     # ---- Loss ------------------------------------------------------------------
     class_w = None if args.no_class_weights else compute_class_weights(train_ds.labels, len(CLASS_ORDER))
     if class_w is not None:
         logger.info(f"Class weights (theo số mẫu Train): {dict(zip(CLASS_ORDER, class_w.numpy().round(3)))}")
-    criterion = DurianClassificationLoss(class_w, label_smoothing=args.label_smoothing,
-                                         focal_gamma=args.focal_gamma).to(device)
+    logger.info(f"Loss Function: {args.loss_type} (focal_gamma={args.focal_gamma}, cost_weight={args.cost_weight})")
+    criterion = DurianClassificationLoss(
+        class_weights=class_w,
+        label_smoothing=args.label_smoothing,
+        focal_gamma=args.focal_gamma,
+        loss_type=args.loss_type,
+        cost_weight=args.cost_weight,
+    ).to(device)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_on and amp_dtype == torch.float16)
 
     config_dump = {**vars(args), "vision_ckpt": str(vision_ckpt), "audio_ckpt": str(audio_ckpt),
