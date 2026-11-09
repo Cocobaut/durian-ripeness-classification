@@ -102,16 +102,19 @@ print("✅ Đã kết nối Google Drive thành công!")
 # ==============================================================================
 %cd /content
 
-REPO_URL = "https://github.com/Cocobaut/durian-ripeness-cmkd.git"  # Đổi URL repo nếu cần
-REPO_DIR = "/content/durian-ripeness-cmkd"
+REPO_URL = "https://github.com/Cocobaut/durian-ripeness-classification.git"
+BRANCH = "cocobaut"
+REPO_DIR = "/content/durian-ripeness-classification"
 
 if not os.path.exists(REPO_DIR):
-    !git clone $REPO_URL
+    !git clone -b $BRANCH $REPO_URL $REPO_DIR
     %cd $REPO_DIR
-    !git checkout cocobaut
 else:
     %cd $REPO_DIR
-    !git pull origin cocobaut
+    !find . -maxdepth 5 -type l -delete
+    !git fetch origin
+    !git checkout -f $BRANCH
+    !git reset --hard origin/$BRANCH
 
 print(f"✅ Đang làm việc tại thư mục gốc: {os.getcwd()}")
 ```
