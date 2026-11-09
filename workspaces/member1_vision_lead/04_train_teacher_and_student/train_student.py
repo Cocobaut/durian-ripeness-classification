@@ -3,22 +3,20 @@
 Phụ trách: Leader / Member 1 (Vision Lead & Multi-Modal Framework)
 Tham chiếu đặc tả: `specification/Đặc tả đề tài.pdf` (Mục 1.3.3 & Mục 1.4) và `tmp_student.md`.
 
-Cơ chế huấn luyện (Giai đoạn 2):
-1. Мо hình Multi-Modal Teacher (`best_teacher.pth`) được nạp và ĐÓNG BĂNG HOÀN TOÀN (`eval()`, `requires_grad=False`).
+Cơ chế huấn luyện nâng cao (Giai đoạn 2):
+1. Mô hình Multi-Modal Teacher (`best_teacher.pth`) được nạp và ĐÓNG BĂNG HOÀN TOÀN (`eval()`, `requires_grad=False`).
 2. Với mỗi mẫu thuộc `MultimodalDataset` (lọc các mẫu có ảnh RGB thật):
    - Teacher nhận `(img, audio, sensor)` -> trích xuất `(logits_teacher, f_mm_teacher)` trong `torch.no_grad()`.
    - Student CHỈ NHẬN `img` -> sinh ra `(logits_student, f_img_student, f_proj_student)`.
-3. Tối ưu hóa Student bằng hàm mất mát tổng hợp 3 thành phần (`CrossModalDistillationLoss`):
-   L_total = alpha * L_CE(y, z_student)
-           + beta  * L_KD(z_student, z_teacher; T)
-           + gamma * L_feat(phi(f_img_student), f_mm_teacher)
-4. Chiến lược 2 pha chống vỡ đặc trưng Pretrained:
+3. Tối ưu hóa Student bằng hàm mất mát 3 thành phần có Trọng số Độ tin cậy & Phương thức (`CrossModalDistillationLoss`):
+   - Tự động giảm trọng số L_KD và L_feat trên các mẫu mà Teacher bị khuyết Audio/Sensor hoặc dự đoán sai nhãn thật.
+4. Chiến lược 2 pha chống Học vẹt danh tính quả (Fruit-Identity Overfitting) và chống sốc Gradient:
    - Pha 1 (Warm-up Freeze, mặc định 3 epoch): đóng băng VisionBackbone của Student, chỉ huấn luyện
-     ProjectionHead phi(.) và Classifier để làm quen với không gian f_mm của Teacher.
-   - Pha 2 (Joint Fine-tuning với Differential LR): mở khóa toàn mạng Student (Backbone LR 1e-4,
-     Head LR 5e-4) kèm Cosine Annealing và Early Stopping.
-5. Khi Validate và Test: Student hoàn toàn độc lập, CHỈ DÙNG ẢNH RGB (`ImageDataset`), không cần
-   Teacher, không cần micro và không cần cảm biến.
+     ProjectionHead phi(.) và Classifier.
+   - Pha 2 (Joint Fine-tuning với Differential LR + Smooth Unfreeze Warmup): mở khóa toàn mạng Student
+     (Backbone LR 3e-5 có ramp-up mượt 2 epoch đầu, Head LR 3e-4, DropPath 0.35, Weight Decay 1e-2).
+5. Khi Validate và Test: Student hoàn toàn độc lập, CHỈ DÙNG ẢNH RGB (`ImageDataset`), kết hợp
+   gộp xác suất cấp quả theo trọng số góc chụp (`angle_weighted_prob`).
 
 Cách chạy (từ thư mục gốc dự án):
     python workspaces/member1_vision_lead/04_train_teacher_and_student/train_student.py --smoke
@@ -34,7 +32,7 @@ import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List
 
 THIS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = THIS_DIR.parents[2]
@@ -73,6 +71,7 @@ if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
 from eval_student import (  # noqa: E402
     build_vision_eval_dataset,
+    compute_angle_weighted_fruit_probs,
     evaluate_student_split,
     generate_benchmark_comparison,
 )
@@ -103,20 +102,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--results-dir",
                    default="workspaces/member1_vision_lead/04_train_teacher_and_student/results_student")
 
-    # Kiến trúc Student
+    # Kiến trúc Student & Regularization chống Overfitting danh tính quả
     p.add_argument("--student-backbone", default="convnextv2_tiny",
                    help="Backbone của Student: convnextv2_tiny (mặc định, ~28M), convnextv2_nano, convnextv2_base, resnet18...")
     p.add_argument("--no-pretrained", action="store_true",
                    help="Tắt tải trọng số ImageNet pretrained khi khởi tạo Student")
-    p.add_argument("--drop-path", type=float, default=0.2)
-    p.add_argument("--head-dropout", type=float, default=0.2)
+    p.add_argument("--drop-path", type=float, default=0.35,
+                   help="Stochastic depth drop_path_rate cho VisionBackbone (tăng lên 0.35 để chống overfit 120 quả)")
+    p.add_argument("--head-dropout", type=float, default=0.3)
     p.add_argument("--proj-hidden-dim", type=int, default=512)
 
-    # Trọng số Distillation Loss (Mục 1.3.3)
+    # Trọng số Distillation Loss & Confidence/Modality Weighting (Mục 1.3.3)
     p.add_argument("--alpha", type=float, default=1.0, help="Trọng số L_CE (nhãn thật)")
     p.add_argument("--beta", type=float, default=2.0, help="Trọng số L_KD (KL Divergence soft logits)")
     p.add_argument("--gamma", type=float, default=1.0, help="Trọng số L_feat (căn chỉnh đặc trưng ẩn f_mm)")
-    p.add_argument("--temperature", type=float, default=3.0, help="Nhiệt độ làm mềm T cho L_KD")
+    p.add_argument("--temperature", type=float, default=2.5, help="Nhiệt độ làm mềm T cho L_KD")
     p.add_argument("--feat-loss-type", default="cosine", choices=["cosine", "mse", "cosine_mse"],
                    help="Hàm đo khoảng cách L_feat giữa phi(f_img) và f_mm")
     p.add_argument("--loss-type", default="cost_sensitive_focal",
@@ -124,24 +124,37 @@ def parse_args() -> argparse.Namespace:
                    help="Loại hàm L_CE của Student")
     p.add_argument("--label-smoothing", type=float, default=0.05)
     p.add_argument("--focal-gamma", type=float, default=2.0)
-    p.add_argument("--cost-weight", type=float, default=0.5)
+    p.add_argument("--cost-weight", type=float, default=0.2,
+                   help="Trọng số phạt thứ tự Ordinal trong L_CE (giảm còn 0.2 để tránh dồn vào lớp giữa Ripe)")
     p.add_argument("--no-class-weights", action="store_true")
+    p.add_argument("--no-confidence-weighting", action="store_true",
+                   help="Tắt cơ chế giảm trọng số L_KD/L_feat khi Teacher khuyết phương thức hoặc đoán sai")
+    p.add_argument("--missing-modality-scale", type=float, default=0.45,
+                   help="Hệ số nhân giảm L_KD/L_feat khi mẫu huấn luyện bị khuyết Audio hoặc Sensor")
+    p.add_argument("--wrong-teacher-scale", type=float, default=0.30,
+                   help="Hệ số nhân giảm L_KD/L_feat khi Teacher dự đoán sai nhãn thật")
 
     # Siêu tham số huấn luyện
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--warmup-epochs", type=int, default=3,
                    help="Số epoch đầu đóng băng backbone để ổn định ProjectionHead + Classifier")
+    p.add_argument("--phase2-warmup-epochs", type=int, default=2,
+                   help="Số epoch đầu của Pha 2 tăng dần LR backbone để tránh sốc gradient khi unfreeze")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--accum-steps", type=int, default=1)
-    p.add_argument("--lr", type=float, default=5e-4, help="LR cho ProjectionHead + Classifier")
-    p.add_argument("--lr-backbone", type=float, default=1e-4, help="LR cho VisionBackbone ở Pha 2")
+    p.add_argument("--lr", type=float, default=3e-4, help="LR cho ProjectionHead + Classifier")
+    p.add_argument("--lr-backbone", type=float, default=3e-5, help="LR cho VisionBackbone ở Pha 2 (3e-5 chống overfit)")
     p.add_argument("--min-lr", type=float, default=1e-6)
     p.add_argument("--weight-decay-head", type=float, default=1e-2)
-    p.add_argument("--weight-decay-backbone", type=float, default=1e-4)
+    p.add_argument("--weight-decay-backbone", type=float, default=1e-2,
+                   help="Weight decay L2 cho VisionBackbone ở Pha 2 (1e-2 ngăn học vẹt danh tính quả)")
     p.add_argument("--patience", type=int, default=10, help="Early stopping patience ở Pha 2")
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--select-metric", default="fruit_macro_f1",
                    choices=["sample_macro_f1", "fruit_macro_f1", "val_loss"])
+    p.add_argument("--fruit-agg", default="angle_weighted_prob",
+                   choices=["angle_weighted_prob", "mean_prob", "majority_vote"],
+                   help="Chiến lược tổng hợp xác suất cấp quả theo góc chụp")
 
     # Phần cứng & Tiện ích
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -254,7 +267,7 @@ def train_one_epoch(
     teacher.eval()
     optimizer.zero_grad(set_to_none=True)
 
-    tot_loss = tot_ce = tot_kd = tot_feat = 0.0
+    tot_loss = tot_ce = tot_kd = tot_feat = tot_w = 0.0
     correct, n_seen, t0 = 0, 0, time.time()
     n_batches = min(len(loader), max_batches) if max_batches > 0 else len(loader)
 
@@ -272,7 +285,15 @@ def train_one_epoch(
 
         with ctx:
             logits_s, _f_img_s, f_proj_s = student(img, return_features=True)
-            loss, parts = criterion(logits_s, logits_t, f_proj_s, f_mm_t, label)
+            loss, parts = criterion(
+                logits_s,
+                logits_t,
+                f_proj_s,
+                f_mm_t,
+                label,
+                audio=audio,
+                sensor=sensor,
+            )
 
         scaler.scale(loss / accum_steps).backward()
         if (step + 1) % accum_steps == 0 or (step + 1) == n_batches:
@@ -288,6 +309,7 @@ def train_one_epoch(
         tot_ce += parts["loss_ce"] * bs
         tot_kd += parts["loss_kd"] * bs
         tot_feat += parts["loss_feat"] * bs
+        tot_w += parts.get("distill_weight_mean", 1.0) * bs
         n_seen += bs
         correct += (logits_s.detach().argmax(1) == label).sum().item()
 
@@ -295,7 +317,7 @@ def train_one_epoch(
             logger.info(
                 f"  {desc} | batch {step + 1}/{n_batches} | "
                 f"loss {tot_loss / n_seen:.4f} (CE {tot_ce / n_seen:.3f}, "
-                f"KD {tot_kd / n_seen:.3f}, Feat {tot_feat / n_seen:.3f}) | "
+                f"KD {tot_kd / n_seen:.3f}, Feat {tot_feat / n_seen:.3f}, w {tot_w / n_seen:.2f}) | "
                 f"{time.time() - t0:.0f}s"
             )
 
@@ -305,6 +327,7 @@ def train_one_epoch(
         "train_loss_ce": tot_ce / denom,
         "train_loss_kd": tot_kd / denom,
         "train_loss_feat": tot_feat / denom,
+        "train_distill_weight": tot_w / denom,
         "train_acc": correct / denom,
     }
 
@@ -317,20 +340,24 @@ def validate_student(
     amp_on: bool,
     amp_dtype: torch.dtype,
     max_batches: int = 0,
+    fruit_agg: str = "angle_weighted_prob",
 ) -> Dict[str, float]:
     """Đánh giá Student trên tập Val CHỈ VỚI ẢNH RGB (không dùng Teacher, Audio hay Sensor)."""
     student.eval()
-    probs_all, y_all, fids = [], [], []
+    probs_all, y_all, fids, angles = [], [], [], []
     for step, batch in enumerate(loader):
         if max_batches and step >= max_batches:
             break
         img, label, fid = batch[0].to(device, non_blocking=True), batch[1], batch[2]
+        extra = batch[3] if len(batch) > 3 and isinstance(batch[3], dict) else {}
+        batch_angles = extra.get("camera_angle", [""] * len(fid))
         ctx = torch.autocast(device.type, dtype=amp_dtype) if amp_on else nullcontext()
         with ctx:
             logits = student(img, return_features=False)
         probs_all.append(F.softmax(logits.float(), dim=-1).cpu())
         y_all.append(label)
         fids.extend(fid)
+        angles.extend([str(a) for a in batch_angles])
 
     probs = torch.cat(probs_all).numpy()
     y = torch.cat(y_all).numpy()
@@ -338,16 +365,24 @@ def validate_student(
     val_loss = float(F.nll_loss(torch.log(torch.from_numpy(probs).clamp_min(1e-12)), torch.from_numpy(y)))
 
     df = pd.DataFrame(probs, columns=[0, 1, 2])
-    df["fruit_id"], df["y"] = fids, y
-    fr = df.groupby("fruit_id").agg({0: "mean", 1: "mean", 2: "mean", "y": "first"})
-    fr_pred = fr[[0, 1, 2]].to_numpy().argmax(1)
+    df["fruit_id"], df["y"], df["camera_angle"] = fids, y, angles
+
+    fr_y, fr_pred = [], []
+    for _fid, g in df.groupby("fruit_id", sort=True):
+        fr_y.append(int(g["y"].iloc[0]))
+        g_probs = g[[0, 1, 2]].to_numpy(dtype=np.float64)
+        if fruit_agg == "angle_weighted_prob":
+            wp = compute_angle_weighted_fruit_probs(g_probs, g["camera_angle"].tolist())
+        else:
+            wp = g_probs.mean(axis=0)
+        fr_pred.append(int(wp.argmax()))
 
     return {
         "val_loss": val_loss,
         "sample_acc": float(accuracy_score(y, pred)),
         "sample_macro_f1": float(f1_score(y, pred, average="macro", labels=[0, 1, 2], zero_division=0)),
-        "fruit_acc": float(accuracy_score(fr["y"], fr_pred)),
-        "fruit_macro_f1": float(f1_score(fr["y"], fr_pred, average="macro", labels=[0, 1, 2], zero_division=0)),
+        "fruit_acc": float(accuracy_score(fr_y, fr_pred)),
+        "fruit_macro_f1": float(f1_score(fr_y, fr_pred, average="macro", labels=[0, 1, 2], zero_division=0)),
     }
 
 
@@ -414,9 +449,12 @@ def main() -> None:
     logger.info("=" * 78)
     logger.info("HUẤN LUYỆN VISION-ONLY STUDENT BẰNG CMKD (GIAI ĐOẠN 2)")
     logger.info(f"Thiết bị: {device} | AMP: {amp_on} ({amp_dtype}) | batch {args.batch_size} x accum {args.accum_steps}")
-    logger.info(f"Student backbone : {resolve_student_backbone_name(args.student_backbone)}")
-    logger.info(f"Distill weights  : alpha={args.alpha} (CE) | beta={args.beta} (KD, T={args.temperature}) | gamma={args.gamma} (Feat: {args.feat_loss_type})")
-    logger.info(f"Best student ckpt: {save_path}")
+    logger.info(f"Student backbone : {resolve_student_backbone_name(args.student_backbone)} (drop_path={args.drop_path})")
+    logger.info(
+        f"Distill weights  : alpha={args.alpha} (CE) | beta={args.beta} (KD, T={args.temperature}) | "
+        f"gamma={args.gamma} (Feat: {args.feat_loss_type}) | conf_weight={not args.no_confidence_weighting}"
+    )
+    logger.info(f"Fruit aggregation: {args.fruit_agg} | Best student ckpt: {save_path}")
     logger.info("=" * 78)
 
     # ---- Chế độ chỉ đánh giá (--eval-only) -------------------------------------
@@ -425,6 +463,7 @@ def main() -> None:
             save_path, args.manifest, args.data_dir, "valid", results_dir,
             batch_size=args.batch_size, num_workers=args.num_workers,
             image_size=args.image_size, device=device, smoke=args.smoke, seed=args.seed,
+            fruit_aggregation_strategy=args.fruit_agg,
         )
         logger.info(f"VAL  | sample F1 {res_val['metrics']['sample_macro_f1']:.4f} | fruit F1 {res_val['metrics']['fruit_macro_f1']:.4f}")
         if args.eval_test:
@@ -432,6 +471,7 @@ def main() -> None:
                 save_path, args.manifest, args.data_dir, "test", results_dir,
                 batch_size=args.batch_size, num_workers=args.num_workers,
                 image_size=args.image_size, device=device, smoke=args.smoke, seed=args.seed,
+                fruit_aggregation_strategy=args.fruit_agg,
             )
             logger.info(f"TEST | sample F1 {res_test['metrics']['sample_macro_f1']:.4f} | fruit F1 {res_test['metrics']['fruit_macro_f1']:.4f}")
             if not args.smoke:
@@ -443,7 +483,6 @@ def main() -> None:
     latent_dim_mm = int(teacher.config.latent_dim_mm)
 
     # ---- 2. Xây dựng Datasets --------------------------------------------------
-    # Train cần MultimodalDataset (để Teacher có cả img + audio + sensor), lọc các mẫu có ảnh RGB thật
     mm_datasets = build_multimodal_datasets(
         resolve_path(args.manifest),
         resolve_path(args.data_dir),
@@ -458,7 +497,6 @@ def main() -> None:
     train_labels = [full_train_ds.samples[i]["label"] for i in rgb_train_indices]
     train_ds = Subset(full_train_ds, rgb_train_indices)
 
-    # Val chỉ dùng ImageDataset (RGB-Only) đúng như điều kiện thực tế của Student
     val_ds = build_vision_eval_dataset(args.manifest, args.data_dir, split="valid", image_size=args.image_size)
     logger.info(f"[data] Train RGB samples: {len(train_ds)} | Val RGB samples: {len(val_ds)}")
 
@@ -503,6 +541,9 @@ def main() -> None:
         label_smoothing=args.label_smoothing,
         focal_gamma=args.focal_gamma,
         cost_weight=args.cost_weight,
+        confidence_weighting=not args.no_confidence_weighting,
+        missing_modality_scale=args.missing_modality_scale,
+        wrong_teacher_scale=args.wrong_teacher_scale,
     ).to(device)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_on and amp_dtype == torch.float16)
 
@@ -545,7 +586,10 @@ def main() -> None:
             device, amp_on, amp_dtype, args.accum_steps, args.grad_clip,
             args.max_batches, f"{phase} ep {epoch}",
         )
-        va = validate_student(student, val_loader, device, amp_on, amp_dtype, args.max_batches)
+        va = validate_student(
+            student, val_loader, device, amp_on, amp_dtype,
+            args.max_batches, fruit_agg=args.fruit_agg,
+        )
         lrs = {f"lr_{g.get('name', i)}": g["lr"] for i, g in enumerate(optimizer.param_groups)}
         row = {"epoch": epoch, "phase": phase, **tr, **va, **lrs}
         history.append(row)
@@ -609,12 +653,12 @@ def main() -> None:
             save_last_state(row, opt1)
         del opt1
 
-    # ---- PHA 2: JOINT FINE-TUNING ----------------------------------------------
+    # ---- PHA 2: JOINT FINE-TUNING (kèm Smooth Unfreeze Warmup) -----------------
     p2_start = max(start_epoch, args.warmup_epochs + 1)
     if phase2_epochs > 0 and p2_start <= args.epochs and bad_epochs < args.patience:
         logger.info(
             f">>> PHA 2 - JOINT DISTILLATION (epoch {p2_start}..{args.epochs}): "
-            f"backbone LR {args.lr_backbone}, head LR {args.lr}"
+            f"backbone LR {args.lr_backbone} (wd={args.weight_decay_backbone}), head LR {args.lr}"
         )
         student.unfreeze_all()
         opt2 = torch.optim.AdamW(
@@ -625,7 +669,20 @@ def main() -> None:
                 head_wd=args.weight_decay_head,
             )
         )
-        sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt2, T_max=phase2_epochs, eta_min=args.min_lr)
+        p2_warmup = min(max(int(args.phase2_warmup_epochs), 0), max(phase2_epochs - 1, 0))
+        if p2_warmup > 0:
+            warmup_sched = torch.optim.lr_scheduler.LinearLR(
+                opt2, start_factor=0.25, end_factor=1.0, total_iters=p2_warmup
+            )
+            cosine_sched = torch.optim.lr_scheduler.CosineAnnealingLR(
+                opt2, T_max=max(phase2_epochs - p2_warmup, 1), eta_min=args.min_lr
+            )
+            sched = torch.optim.lr_scheduler.SequentialLR(
+                opt2, schedulers=[warmup_sched, cosine_sched], milestones=[p2_warmup]
+            )
+        else:
+            sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt2, T_max=phase2_epochs, eta_min=args.min_lr)
+
         if resume_state and resume_state.get("phase") == "phase2":
             if resume_state.get("optimizer_state_dict"):
                 opt2.load_state_dict(resume_state["optimizer_state_dict"])
@@ -664,6 +721,7 @@ def main() -> None:
             save_path, args.manifest, args.data_dir, "valid", results_dir,
             batch_size=args.batch_size, num_workers=args.num_workers,
             image_size=args.image_size, device=device, smoke=args.smoke, seed=args.seed,
+            fruit_aggregation_strategy=args.fruit_agg,
         )
         logger.info(
             f"VAL  | sample Acc {res_val['metrics']['sample_accuracy']:.4f} | "
@@ -677,6 +735,7 @@ def main() -> None:
                 save_path, args.manifest, args.data_dir, "test", results_dir,
                 batch_size=args.batch_size, num_workers=args.num_workers,
                 image_size=args.image_size, device=device, smoke=args.smoke, seed=args.seed,
+                fruit_aggregation_strategy=args.fruit_agg,
             )
             logger.info(
                 f"TEST | sample Acc {res_test['metrics']['sample_accuracy']:.4f} | "
@@ -694,4 +753,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
