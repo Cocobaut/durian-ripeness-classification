@@ -189,3 +189,70 @@ def test_load_real_unimodal_checkpoints():
     assert logits.shape == (2, 3)
     assert f_mm.shape == (2, 256)
 
+
+def test_student_model_and_distillation_loss(tmp_path):
+    from src.losses.distillation_loss import CrossModalDistillationLoss
+    from src.models.student_model import (
+        StudentConfig,
+        VisionStudent,
+        build_student_from_checkpoint,
+        student_checkpoint_dict,
+    )
+
+    cfg = StudentConfig(
+        backbone_name="resnet18",
+        pretrained=False,
+        drop_path_rate=0.0,
+        num_classes=3,
+        proj_hidden_dim=128,
+        latent_dim_mm=256,
+        head_dropout=0.1,
+    )
+    student = VisionStudent(cfg)
+    assert student.feat_dim == 512
+
+    # Pha 1: freeze backbone
+    student.freeze_backbone()
+    assert not any(p.requires_grad for p in student.vision_backbone.parameters())
+    assert all(p.requires_grad for p in student.projection_head.parameters())
+    assert all(p.requires_grad for p in student.classifier.parameters())
+
+    # Pha 2: unfreeze all + differential LR
+    student.unfreeze_all()
+    groups = student.param_groups(backbone_lr=1e-4, head_lr=5e-4)
+    group_lrs = {g["name"]: g["lr"] for g in groups}
+    assert group_lrs["backbone"] == pytest.approx(1e-4)
+    assert group_lrs["student_head"] == pytest.approx(5e-4)
+
+    # Forward & Distillation Loss
+    img = torch.randn(4, 3, 64, 64)
+    logits_s, f_img_s, f_proj_s = student(img, return_features=True)
+    assert logits_s.shape == (4, 3)
+    assert f_img_s.shape == (4, 512)
+    assert f_proj_s.shape == (4, 256)
+
+    logits_t = torch.randn(4, 3)
+    f_mm_t = torch.randn(4, 256)
+    targets = torch.tensor([0, 1, 2, 1])
+
+    distill_crit = CrossModalDistillationLoss(
+        alpha=1.0, beta=2.0, gamma=1.0, temperature=3.0, feat_loss_type="cosine"
+    )
+    loss, parts = distill_crit(logits_s, logits_t, f_proj_s, f_mm_t, targets)
+    loss.backward()
+    assert loss.item() > 0
+    assert parts["loss_ce"] > 0
+    assert parts["loss_kd"] >= 0
+    assert parts["loss_feat"] >= 0
+
+    # Lưu & nạp checkpoint Student
+    student.eval()
+    ckpt_path = tmp_path / "best_student.pth"
+    torch.save(student_checkpoint_dict(student, epoch=2), ckpt_path)
+    loaded = build_student_from_checkpoint(ckpt_path, device="cpu", eval_mode=True)
+    with torch.no_grad():
+        out1 = student(img, return_features=False)
+        out2 = loaded(img, return_features=False)
+    assert torch.allclose(out1, out2, atol=1e-6)
+
+
