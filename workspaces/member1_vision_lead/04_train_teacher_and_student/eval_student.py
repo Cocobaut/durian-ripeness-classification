@@ -6,9 +6,6 @@ Tham chiếu đặc tả: Mục 1.3.3 & Mục 1.4.
 Đặc điểm quan trọng:
 - Khi đánh giá / suy luận thực tế, Student CHỈ NHẬN ẢNH RGB (`ImageDataset`, `input_mode="vision"`).
 - Không cần micro thu âm, không cần cảm biến và không cần mô hình Teacher.
-- Tích hợp chiến lược gộp cấp quả có trọng số theo góc chụp (`angle_weighted_prob`):
-  Ưu tiên góc chụp cuống quả (`TOP`) và các mặt bên (`SD`, `SA`, `SB`), giảm trọng số góc đáy (`BOT`)
-  vốn chứa ít thông tin thị giác phân biệt độ chín.
 - Tự động tổng hợp bảng đối sánh `benchmark_comparison.csv` & `benchmark_comparison.md` giữa:
   Vision Unimodal vs Audio Unimodal vs Sensor Unimodal vs Multi-Modal Teacher vs Vision-Only Student.
 
@@ -25,14 +22,13 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, Optional, Sequence, Union
+from typing import Dict, Optional, Union
 
 THIS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = THIS_DIR.parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import torch  # noqa: E402
 from sklearn.metrics import accuracy_score, f1_score  # noqa: E402
@@ -46,89 +42,9 @@ from src.utils.common import resolve_path  # noqa: E402
 EVAL_TEACHER_DIR = PROJECT_ROOT / "workspaces" / "member2_audio" / "03_test_eval_teacher_and_gradcam"
 if str(EVAL_TEACHER_DIR) not in sys.path:
     sys.path.insert(0, str(EVAL_TEACHER_DIR))
-from eval_teacher import (  # noqa: E402
-    IDX_TO_LABEL,
-    LABEL_TO_IDX,
-    TeacherEvaluator,
-    TeacherEvaluatorConfig,
-)
+from eval_teacher import TeacherEvaluator, TeacherEvaluatorConfig  # noqa: E402
 
 logger = logging.getLogger("eval_student")
-
-# Trọng số mặc định theo góc chụp camera cho bài toán phân loại độ chín bằng ảnh RGB:
-# - TOP (cuống quả) và SD/SA/SB (các góc mặt bên chính) mang nhiều dấu hiệu độ chín nhất.
-# - BOT (đáy quả) có cụm gai chụm ít biến đổi theo độ chín nên được giảm trọng số.
-DEFAULT_CAMERA_ANGLE_WEIGHTS: Dict[str, float] = {
-    "TOP": 1.35,
-    "SD": 1.25,
-    "SA": 1.15,
-    "SB": 1.10,
-    "SC": 0.90,
-    "BOT": 0.45,
-}
-
-
-def compute_angle_weighted_fruit_probs(
-    probs: np.ndarray,
-    camera_angles: Sequence[str],
-    angle_weights: Optional[Dict[str, float]] = None,
-) -> np.ndarray:
-    """Tính vector xác suất cấp quả [3] có trọng số theo góc chụp `camera_angle` và độ tự tin mẫu."""
-    w_map = DEFAULT_CAMERA_ANGLE_WEIGHTS if angle_weights is None else angle_weights
-    angle_w = np.array([float(w_map.get(str(a).upper(), 1.0)) for a in camera_angles], dtype=np.float64)
-    # Kết hợp nhẹ với độ tự tin của từng góc chụp (0.75 + 0.25 * max_prob) để giảm nhiễu từ góc bị mờ/lóa
-    max_prob = probs.max(axis=1)
-    sample_w = (angle_w * (0.75 + 0.25 * max_prob))[:, None]
-    weighted_probs = (probs * sample_w).sum(axis=0) / max(float(sample_w.sum()), 1e-12)
-    return weighted_probs / max(float(weighted_probs.sum()), 1e-12)
-
-
-class StudentEvaluator(TeacherEvaluator):
-    """Bộ đánh giá mở rộng hỗ trợ `angle_weighted_prob` khi tổng hợp dự đoán cấp quả cho Student."""
-
-    def __init__(
-        self,
-        config: TeacherEvaluatorConfig,
-        model: Optional[torch.nn.Module] = None,
-        test_loader: Optional[DataLoader] = None,
-        angle_weights: Optional[Dict[str, float]] = None,
-    ) -> None:
-        super().__init__(config, model=model, test_loader=test_loader)
-        self.angle_weights = DEFAULT_CAMERA_ANGLE_WEIGHTS if angle_weights is None else dict(angle_weights)
-
-    def evaluate_fruit_level(
-        self,
-        sample_df: pd.DataFrame,
-        strategy: Optional[str] = None,
-    ) -> pd.DataFrame:
-        agg_strategy = strategy or self.config.fruit_aggregation_strategy
-        if agg_strategy != "angle_weighted_prob":
-            return super().evaluate_fruit_level(sample_df, strategy=agg_strategy)
-
-        logger.info("Tổng hợp kết quả cấp độ quả (fruit_id) theo chiến lược: angle_weighted_prob...")
-        prob_cols = ["prob_unripe", "prob_ripe", "prob_overripe"]
-        rows = []
-        for fruit_id, group in sample_df.groupby("fruit_id", sort=True):
-            true_label = group["true_label"].mode().iloc[0]
-            probs = group[prob_cols].to_numpy(dtype=np.float64)
-            angles = group["camera_angle"].astype(str).tolist() if "camera_angle" in group.columns else [""] * len(group)
-            mean_probs = compute_angle_weighted_fruit_probs(probs, angles, self.angle_weights)
-            pred_idx = int(mean_probs.argmax())
-            rows.append({
-                "fruit_id": fruit_id,
-                "true_label": true_label,
-                "pred_label": IDX_TO_LABEL[pred_idx],
-                "prob_unripe_mean": float(mean_probs[0]),
-                "prob_ripe_mean": float(mean_probs[1]),
-                "prob_overripe_mean": float(mean_probs[2]),
-                "is_correct": bool(true_label == IDX_TO_LABEL[pred_idx]),
-                "n_samples": int(len(group)),
-                "y_true": LABEL_TO_IDX[true_label],
-                "y_pred": pred_idx,
-            })
-        fruit_df = pd.DataFrame(rows)
-        logger.info(f"Đã tổng hợp {len(fruit_df)} quả, fruit accuracy = {fruit_df['is_correct'].mean():.4f}")
-        return fruit_df
 
 
 class _ManifestFallbackImageDataset(torch.utils.data.Dataset):
@@ -180,7 +96,6 @@ def evaluate_student_split(
     smoke: bool = False,
     seed: int = 42,
     model: Optional[VisionStudent] = None,
-    fruit_aggregation_strategy: str = "angle_weighted_prob",
 ) -> Dict:
     """Chấm điểm mô hình VisionStudent trên tập `valid` hoặc `test` chỉ với ảnh RGB."""
     ckpt_path = resolve_path(ckpt_path)
@@ -217,10 +132,9 @@ def evaluate_student_split(
         input_mode="vision",
         split_name=split_prefix,
         model_name="vision_student",
-        fruit_aggregation_strategy=fruit_aggregation_strategy,
         seed=seed,
     )
-    evaluator = StudentEvaluator(cfg, model=model, test_loader=loader)
+    evaluator = TeacherEvaluator(cfg, model=model, test_loader=loader)
     return evaluator.run_full_evaluation_pipeline(load_checkpoint=False)
 
 
@@ -342,8 +256,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--image-size", type=int, default=IMAGE_SIZE)
-    p.add_argument("--fruit-agg", default="angle_weighted_prob",
-                   choices=["angle_weighted_prob", "mean_prob", "majority_vote"])
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--seed", type=int, default=42)
@@ -364,7 +276,6 @@ def main() -> None:
         device=args.device,
         smoke=args.smoke,
         seed=args.seed,
-        fruit_aggregation_strategy=args.fruit_agg,
     )
     m = res["metrics"]
     print(
@@ -378,3 +289,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
