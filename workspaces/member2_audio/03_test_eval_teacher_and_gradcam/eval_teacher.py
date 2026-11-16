@@ -1,31 +1,31 @@
-"""Module kiểm thử, đánh giá mô hình Multi-Modal Teacher và trực quan hóa giải thích (Grad-CAM / XAI).
+"""Evaluation module for the Multi-Modal Teacher and explainability visualization (Grad-CAM / XAI).
 
-Phụ trách: Member 2 (Nhánh Âm thanh & Đánh giá Đa phương thức / XAI)
-Dự án: Nhận diện quả sầu riêng chín hay không bằng Chưng cất tri thức Đa phương thức (CMKD)
-Tham chiếu đặc tả:
-- Mục 1.3.2: Giai đoạn 1 - Huấn luyện Unimodal Baselines và Xây dựng Multi-Modal Teacher.
-- Mục 1.4 (Mục tiêu 2 & 4): Thiết lập hệ thống Benchmark toàn diện (Unimodal vs. Multimodal)
-  và Giải thích mô hình trực quan (Explainable AI - XAI) kèm Phân tích giới hạn vật lý.
+Responsible: Member 2 (Audio & Multi-Modal Evaluation / XAI)
+Project: Durian Ripeness Classification via Cross-Modal Knowledge Distillation (CMKD)
+Specification reference:
+- Section 1.3.2: Stage 1 - Unimodal Baselines and Multi-Modal Teacher construction.
+- Section 1.4 (Objectives 2 & 4): Comprehensive Benchmark Suite (Unimodal vs. Multimodal)
+  and Visual Explainability (Explainable AI - XAI) with Physical Limitation Analysis.
 
-Mô tả vai trò của file:
-1. Đánh giá độc lập mô hình Teacher (hợp nhất 3 nhánh: RGB Image + Knock Sound + Sensor/Tabular)
-   trên tập kiểm thử độc lập (Test Set) nhằm thiết lập "Mốc trần chất lượng" (Upper Bound).
-2. Đánh giá tính đóng góp của từng phương thức (Modality Ablation / Zero-Masking):
-   Kiểm tra sự suy giảm hiệu năng khi che/khuyết từng nhánh (w/o Audio, w/o Sensor, w/o RGB)
-   để chứng minh giá trị của thông tin âm học và cảm biến đối với việc nhận diện độ chín.
-3. Tổng hợp kết quả ở 2 cấp độ: Cấp độ mẫu đơn lẻ (Sample-level) và Cấp độ từng quả sầu riêng (Fruit-level).
-4. Triển khai kỹ thuật Grad-CAM trên nhánh ảnh của Teacher để giải thích trực quan:
-   Xem xét mạng tập trung vào vùng hình thái nào (rãnh gai, đĩa cuống, vỏ) dưới sự dẫn dắt
-   của thông tin âm thanh gõ và cảm biến.
-5. Phân tích lỗi chuyên sâu (Error Analysis): Đào sâu các ca dự đoán sai và đối chiếu với
-   các thông số vật lý (độ cứng Firmness, hàm lượng đường TSS, đặc tính âm thanh gõ).
+Module responsibilities:
+1. Independently evaluate the Teacher model (fusing 3 branches: RGB Image + Knock Sound + Sensor/Tabular)
+   on the held-out Test Set to establish the "Performance Upper Bound".
+2. Evaluate modality contributions (Modality Ablation / Zero-Masking):
+   Measure performance degradation when zero-masking each branch (w/o Audio, w/o Sensor, w/o RGB)
+   to quantify the value of acoustic and sensor cues for ripeness classification.
+3. Aggregate results at 2 levels: Sample-level and Fruit-level.
+4. Provide Grad-CAM hooks on the Teacher's vision branch for visual explanation:
+   Inspect which morphological regions (spine grooves, pedicel disc, shell) the network attends to
+   when guided by knock acoustics and sensor measurements.
+5. In-depth Error Analysis: examine misclassified cases and correlate them with
+   physical properties (Firmness, TSS, knock acoustic characteristics).
 
-LƯU Ý DÀNH CHO THÀNH VIÊN PHỤ TRÁCH:
-- File này đã được thiết kế sẵn khung kiến trúc hướng đối tượng (OOP) gồm các class, method signatures,
-  docstrings và các bước gợi ý triển khai tuần tự.
-- Thành viên phụ trách cần đọc kỹ các comment TODO trong từng hàm để tự hoàn thiện mã nguồn chi tiết.
-- Các metric được gợi ý sẵn ở dưới; thành viên phụ trách CẦN TỰ TÌM THÊM các metric khác phù hợp
-  với bài toán phân loại đa lớp / mất cân bằng dữ liệu và bài toán đánh giá bản đồ nhiệt Grad-CAM.
+NOTES FOR ASSIGNED MEMBER:
+- This file provides the object-oriented scaffolding (classes, method signatures,
+  docstrings, and sequential implementation guidelines).
+- Read the TODO comments in each method to complete remaining XAI/Error Analysis extensions.
+- Standard metrics are provided; additional domain-specific metrics for multi-class / imbalanced
+  classification and Grad-CAM evaluation can be added as needed.
 """
 
 from __future__ import annotations
@@ -48,7 +48,7 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.figure import Figure
 from torch.utils.data import DataLoader, Dataset
 
-# Cấu hình logging phục vụ theo dõi quá trình đánh giá
+# Configure logging for evaluation tracking
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] [%(levelname)s] [%(name)s]: %(message)s",
@@ -57,16 +57,16 @@ logging.basicConfig(
 logger = logging.getLogger("eval_teacher")
 
 # ------------------------------------------------------------------------------
-# 1. HẰNG SỐ CHUẨN TOÀN DỰ ÁN (PROJECT CONSTANTS)
+# 1. PROJECT CONSTANTS
 # ------------------------------------------------------------------------------
-CLASS_ORDER = ["Unripe", "Ripe", "Overripe"]  # 0: Chưa chín, 1: Chín, 2: Chín quá / Quá chín
+CLASS_ORDER = ["Unripe", "Ripe", "Overripe"]  # 0: Unripe, 1: Ripe, 2: Overripe
 LABEL_TO_IDX = {cls_name: idx for idx, cls_name in enumerate(CLASS_ORDER)}
 IDX_TO_LABEL = {idx: cls_name for idx, cls_name in enumerate(CLASS_ORDER)}
 NUM_CLASSES = len(CLASS_ORDER)
 
 
 # ------------------------------------------------------------------------------
-# 2. CẤU HÌNH ĐÁNH GIÁ TEACHER MODEL (DATACLASS CONFIG)
+# 2. TEACHER EVALUATOR CONFIGURATION (DATACLASS CONFIG)
 # ------------------------------------------------------------------------------
 INPUT_MODES = ("multimodal", "audio", "vision", "sensor")
 ABLATION_MODALITIES = ("audio", "sensor", "vision")
@@ -74,78 +74,78 @@ ABLATION_MODALITIES = ("audio", "sensor", "vision")
 
 @dataclass
 class TeacherEvaluatorConfig:
-    """Cấu hình tham số cho quy trình đánh giá mô hình Multi-Modal Teacher và Grad-CAM.
+    """Parameter configuration for Multi-Modal Teacher evaluation and Grad-CAM.
 
-    Thành viên phụ trách có thể hiệu chỉnh các đường dẫn và tham số cho phù hợp
-    với môi trường chạy thực tế hoặc bổ sung thêm các cờ cấu hình mới.
+    Paths and hyperparameters can be customized to match the target execution
+    environment or extended with additional flags.
     """
-    # Đường dẫn file trọng số Teacher đã huấn luyện tốt nhất
+    # Path to best trained Teacher checkpoint
     teacher_checkpoint_path: str = "checkpoints/teacher_best.pth"
 
-    # Đường dẫn manifest dữ liệu sạch hoàn chỉnh (Master Manifest)
+    # Path to clean master multimodal manifest CSV
     manifest_path: str = "data/final/final_multimodal_manifest.csv"
 
-    # Thư mục chứa tập kiểm thử chuẩn hóa (Test Set)
+    # Directory containing standardized Test Set
     test_data_dir: str = "data/final/test"
 
-    # Thư mục lưu trữ kết quả đánh giá (bảng số liệu, ma trận nhầm lẫn, ảnh Grad-CAM)
+    # Output directory for evaluation results (metrics tables, confusion matrices, Grad-CAM images)
     output_dir: str = "workspaces/member2_audio/03_test_eval_teacher_and_gradcam/results"
 
-    # Cấu hình phần cứng và nạp dữ liệu
+    # Hardware & data loading configuration
     batch_size: int = 16
     num_workers: int = 4
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     seed: int = 42
 
-    # Tên tầng tích chập cuối cùng của nhánh Vision trong Teacher dùng để tính Grad-CAM
-    # Gợi ý: ví dụ nếu backbone là ResNet50: 'vision_backbone.layer4'
-    # hoặc EfficientNet: 'vision_backbone.features.7'
+    # Final convolutional layer name in the Teacher's Vision branch for Grad-CAM
+    # Hint: e.g., for ResNet50: 'vision_backbone.layer4'
+    # or EfficientNet: 'vision_backbone.features.7'
     gradcam_target_layer: str = "vision_backbone.layer4"
 
-    # Danh sách các góc chụp của quả để kiểm tra độ ổn định theo góc
+    # List of fruit camera angles for angle-wise consistency evaluation
     camera_angles: List[str] = field(
         default_factory=lambda: ["TOP", "BOT", "SA", "SB", "SC", "SD"]
     )
 
-    # Chiến lược tổng hợp kết quả nhiều góc/nhiều tiếng gõ về cấp độ quả ('mean_prob' hoặc 'majority_vote')
+    # Fruit-level aggregation strategy across angles/knocks ('mean_prob' or 'majority_vote')
     fruit_aggregation_strategy: str = "mean_prob"
 
-    # [BỔ SUNG] Chế độ đầu vào của mô hình cần đánh giá:
-    # - "multimodal": batch = (img, audio, sensor, label, fruit_id[, extra]) và gọi model(images, audios, sensors)
-    # - "audio" / "vision" / "sensor": batch = (x, label, fruit_id[, extra]) hoặc dict {x, label, fruit_id, ...}, gọi model(x)
+    # [ADDED] Input mode of the evaluated model:
+    # - "multimodal": batch = (img, audio, sensor, label, fruit_id[, extra]) and calls model(images, audios, sensors)
+    # - "audio" / "vision" / "sensor": batch = (x, label, fruit_id[, extra]) or dict {x, label, fruit_id, ...}, calls model(x)
     input_mode: str = "multimodal"
 
-    # [BỔ SUNG] Tên tập dữ liệu đang chấm ("val", "test", ...) dùng làm tiền tố tên file kết quả
+    # [ADDED] Dataset split prefix used in output filenames ("val", "test", ...)
     split_name: str = "test"
 
-    # [BỔ SUNG] Tên mô hình ghi vào bảng metrics (để ghép bảng so sánh giữa các nhánh)
+    # [ADDED] Model name recorded in metrics tables (for cross-branch comparison)
     model_name: str = "teacher"
 
-    # [BỔ SUNG] Số bin khi tính Expected Calibration Error
+    # [ADDED] Number of bins for Expected Calibration Error
     ece_bins: int = 15
 
 
 # ------------------------------------------------------------------------------
-# 3. CLASS CHÍNH: ĐÁNH GIÁ MÔ HÌNH TEACHER (TEACHER EVALUATOR)
+# 3. MAIN CLASS: TEACHER EVALUATOR
 # ------------------------------------------------------------------------------
 class TeacherEvaluator:
-    """Bộ đánh giá toàn diện mô hình Hợp nhất Đa phương thức (Multi-Modal Teacher).
+    """Comprehensive evaluator for the Multi-Modal Teacher fusion model.
 
-    Trách nhiệm chính của class:
-    1. Tải mô hình Teacher đã huấn luyện và nạp trọng số tối ưu từ checkpoint.
-    2. Chạy suy luận trên toàn bộ tập dữ liệu Test độc lập.
-    3. Tính toán các chỉ số đo lường hiệu năng (Classification Metrics) ở 2 cấp độ:
-       - Cấp độ mẫu đơn lẻ (Sample-level / Per-sample evaluation).
-       - Cấp độ cá thể quả (Fruit-level aggregated evaluation).
-    4. Đánh giá tính đóng góp của từng phương thức qua kỹ thuật Zero-masking / Modality Ablation:
-       Đo lường mức độ sụt giảm hiệu năng khi mất nhánh Âm thanh, Cảm biến hoặc Thị giác.
-    5. Xuất báo cáo chi tiết ra file CSV, Markdown và trực quan hóa ma trận nhầm lẫn.
+    Core responsibilities:
+    1. Load the trained Teacher model and restore optimal checkpoint weights.
+    2. Run inference across the entire held-out Test Set.
+    3. Compute classification metrics at 2 levels:
+       - Sample-level / Per-sample evaluation.
+       - Fruit-level aggregated evaluation.
+    4. Assess modality contributions via Zero-Masking / Modality Ablation:
+       Measure performance drop when masking Audio, Sensor, or Vision branches.
+    5. Export detailed reports to CSV, JSON, logs, and confusion matrix plots.
 
-    Ngoài Teacher, class cũng chấm được mô hình ĐƠN phương thức (vd nhánh âm thanh Tuần 2)
-    bằng cách đặt `config.input_mode = "audio"` (bỏ qua bước ablation).
+    Also supports evaluating UNIMODAL models (e.g., Week 2 audio branch) by setting
+    `config.input_mode = "audio"` (skips modality ablation).
     """
 
-    # Tên khóa được chấp nhận khi batch là dict
+    # Accepted dictionary keys when batch is a dict
     _KEYS = {
         "image": ("image", "images", "img", "rgb"),
         "audio": ("audio", "audios", "mel", "audio_mel"),
@@ -161,15 +161,15 @@ class TeacherEvaluator:
         model: Optional[nn.Module] = None,
         test_loader: Optional[DataLoader] = None,
     ) -> None:
-        """Khởi tạo bộ đánh giá Teacher.
+        """Initialize the Teacher evaluator.
 
         Args:
-            config: Đối tượng cấu hình chứa đường dẫn và siêu tham số.
-            model: Mô hình Multi-Modal Teacher đã khởi tạo (nếu None sẽ tự nạp từ checkpoint).
-            test_loader: PyTorch DataLoader của tập kiểm thử Test.
+            config: Configuration dataclass containing paths and hyperparameters.
+            model: Initialized Multi-Modal Teacher instance (if None, loaded from checkpoint).
+            test_loader: PyTorch DataLoader for the evaluation split.
         """
         if config.input_mode not in INPUT_MODES:
-            raise ValueError(f"input_mode phải thuộc {INPUT_MODES}, nhận được: {config.input_mode!r}")
+            raise ValueError(f"input_mode must be one of {INPUT_MODES}, got: {config.input_mode!r}")
         self.config = config
         self.device = torch.device(config.device)
         self.output_dir = Path(config.output_dir)
@@ -180,11 +180,11 @@ class TeacherEvaluator:
             self.model.to(self.device)
         self.test_loader = test_loader
 
-        logger.info(f"Khởi tạo TeacherEvaluator trên thiết bị: {self.device} (input_mode={config.input_mode})")
-        logger.info(f"Kết quả đánh giá sẽ được lưu tại: {self.output_dir}")
+        logger.info(f"Initialized TeacherEvaluator on device: {self.device} (input_mode={config.input_mode})")
+        logger.info(f"Evaluation results will be saved to: {self.output_dir}")
 
     # ------------------------------------------------------------------
-    # Tiện ích nội bộ
+    # Internal utilities
     # ------------------------------------------------------------------
     def _file_prefix(self, split_name: Optional[str] = None) -> str:
         name = self.config.split_name if split_name is None else split_name
@@ -192,7 +192,7 @@ class TeacherEvaluator:
 
     @staticmethod
     def _to_list(value: Any, n: int) -> List[Any]:
-        """Chuyển tensor / ndarray / list / scalar thành list Python độ dài n."""
+        """Convert tensor / ndarray / list / scalar into a Python list of length n."""
         if isinstance(value, torch.Tensor):
             value = value.detach().cpu()
             value = value.tolist() if value.ndim > 0 else [value.item()] * n
@@ -202,7 +202,7 @@ class TeacherEvaluator:
             value = [value] * n
         value = list(value)
         if len(value) != n:
-            raise ValueError(f"Độ dài trường phụ ({len(value)}) khác batch size ({n}).")
+            raise ValueError(f"Auxiliary field length ({len(value)}) differs from batch size ({n}).")
         return value
 
     @classmethod
@@ -213,7 +213,7 @@ class TeacherEvaluator:
         return None
 
     def _unpack_batch(self, batch: Any) -> Tuple[Tuple[torch.Tensor, ...], torch.Tensor, Any, Dict[str, Any]]:
-        """Tách batch thành (inputs, labels, fruit_ids, extras) theo `config.input_mode`."""
+        """Unpack batch into (inputs, labels, fruit_ids, extras) according to `config.input_mode`."""
         multimodal = self.config.input_mode == "multimodal"
         extras: Dict[str, Any] = {}
         if isinstance(batch, dict):
@@ -231,8 +231,8 @@ class TeacherEvaluator:
             n_in = 3 if multimodal else 1
             if len(batch) < n_in + 2:
                 raise ValueError(
-                    f"Batch dạng tuple cần ít nhất {n_in + 2} phần tử cho input_mode={self.config.input_mode!r}, "
-                    f"nhận được {len(batch)}."
+                    f"Tuple batch requires at least {n_in + 2} items for input_mode={self.config.input_mode!r}, "
+                    f"got {len(batch)}."
                 )
             inputs = tuple(batch[:n_in])
             labels, fruit_ids = batch[n_in], batch[n_in + 1]
@@ -242,58 +242,55 @@ class TeacherEvaluator:
                 else:
                     extras[f"extra_{i}"] = extra
         else:
-            raise TypeError(f"Không hỗ trợ kiểu batch: {type(batch)}")
+            raise TypeError(f"Unsupported batch type: {type(batch)}")
         if labels is None or fruit_ids is None or any(t is None for t in inputs):
-            raise ValueError("Batch thiếu input, label hoặc fruit_id.")
+            raise ValueError("Batch is missing input, label, or fruit_id.")
         return inputs, labels, fruit_ids, extras
 
     @staticmethod
     def _extract_logits(output: Any) -> torch.Tensor:
-        """Lấy logits từ output của model: tensor, (logits, features) hoặc dict có khóa 'logits'."""
+        """Extract logits from model output: tensor, (logits, features), or dict with 'logits' key."""
         if isinstance(output, torch.Tensor):
             return output
         if isinstance(output, (list, tuple)) and len(output) > 0:
             return output[0]
         if isinstance(output, dict) and "logits" in output:
             return output["logits"]
-        raise TypeError(f"Không lấy được logits từ output kiểu {type(output)}")
+        raise TypeError(f"Could not extract logits from output of type {type(output)}")
 
     # ------------------------------------------------------------------
-    # 3.1. Nạp mô hình
+    # 3.1. Model loading
     # ------------------------------------------------------------------
     def load_teacher_model(self, checkpoint_path: Optional[str] = None) -> nn.Module:
-        """Tải mô hình Teacher và load state_dict từ đường dẫn checkpoint.
+        """Load Teacher model and restore state_dict from checkpoint path.
 
-        Hướng dẫn thực hiện cho Member 2 (TODO):
+        Implementation notes:
         ---------------------------------------------------------
-        1. Import kiến trúc mô hình Multi-Modal Teacher từ module huấn luyện
-           (ví dụ: `from workspaces.member1_vision_lead.04_train_teacher_and_student... import MultiModalTeacher`).
-        2. Khởi tạo instance mô hình với cấu hình embedding đúng như lúc huấn luyện.
-        3. Sử dụng `torch.load(path, map_location=self.device)` để lấy checkpoint dict.
-        4. Trích xuất state_dict (xử lý trường hợp có prefix 'module.' nếu huấn luyện DataParallel).
-        5. Gọi `model.load_state_dict(checkpoint['model_state_dict'])`.
-        6. Chuyển mô hình sang chế độ đánh giá `model.eval()` và đóng băng gradient (`requires_grad = False`).
+        1. Instantiate the Teacher architecture matching the training configuration.
+        2. Load checkpoint dictionary via `torch.load(path, map_location=self.device)`.
+        3. Extract state_dict (stripping 'module.' prefix if trained with DataParallel).
+        4. Load weights into the model instance and freeze parameters in eval mode.
 
-        Ghi chú triển khai: kiến trúc Teacher do Lead định nghĩa ở Tuần 3, nên hàm này KHÔNG tự đoán
-        kiến trúc. Hãy truyền instance mô hình qua `TeacherEvaluator(config, model=...)`; hàm sẽ nạp
-        trọng số vào instance đó. Checkpoint có thể là state_dict thuần hoặc dict có khóa 'model_state_dict'.
+        Note: since the Teacher architecture is defined by Lead, this method does not guess
+        the architecture. Pass an initialized model via `TeacherEvaluator(config, model=...)`
+        and this method loads weights into it. Supports raw state_dict or dicts with 'model_state_dict'.
 
         Args:
-            checkpoint_path: Đường dẫn tới file .pth (nếu None sẽ lấy từ self.config).
+            checkpoint_path: Path to .pth file (defaults to self.config.teacher_checkpoint_path).
 
         Returns:
-            nn.Module: Mô hình Teacher đã sẵn sàng suy luận.
+            nn.Module: Teacher model ready for inference.
         """
         ckpt_path = checkpoint_path or self.config.teacher_checkpoint_path
-        logger.info(f"Bắt đầu load trọng số Teacher từ: {ckpt_path}")
+        logger.info(f"Loading Teacher weights from: {ckpt_path}")
 
         if self.model is None:
             raise RuntimeError(
-                "Chưa có instance mô hình. Hãy khởi tạo kiến trúc (vd MultiModalTeacher của Lead) rồi truyền vào "
-                "TeacherEvaluator(config, model=model) trước khi gọi load_teacher_model()."
+                "No model instance provided. Initialize the architecture (e.g., MultiModalTeacher) and pass it to "
+                "TeacherEvaluator(config, model=model) before calling load_teacher_model()."
             )
         if not os.path.isfile(ckpt_path):
-            raise FileNotFoundError(f"Không tìm thấy checkpoint: {ckpt_path}")
+            raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
         checkpoint = torch.load(ckpt_path, map_location=self.device, weights_only=False)
         state_dict = checkpoint
@@ -306,51 +303,51 @@ class TeacherEvaluator:
         missing, unexpected = self.model.load_state_dict(state_dict, strict=False)
         if missing or unexpected:
             raise RuntimeError(
-                f"State dict không khớp kiến trúc: thiếu {len(missing)} khóa (vd {missing[:3]}), "
-                f"thừa {len(unexpected)} khóa (vd {unexpected[:3]})."
+                f"State dict does not match architecture: missing {len(missing)} keys (e.g., {missing[:3]}), "
+                f"unexpected {len(unexpected)} keys (e.g., {unexpected[:3]})."
             )
         self.model.to(self.device).eval()
         for param in self.model.parameters():
             param.requires_grad = False
-        logger.info("Nạp trọng số thành công.")
+        logger.info("Weights loaded successfully.")
         return self.model
 
     # ------------------------------------------------------------------
-    # 3.2. Suy luận cấp độ sample
+    # 3.2. Sample-level inference
     # ------------------------------------------------------------------
     def evaluate_sample_level(
         self,
         test_loader: Optional[DataLoader] = None,
         mask_modality: Optional[str] = None,
     ) -> pd.DataFrame:
-        """Chạy vòng lặp kiểm thử trên từng mẫu dữ liệu (sample-level evaluation).
+        """Run evaluation loop on individual samples (sample-level evaluation).
 
-        Trong bài toán này, mỗi quả sầu riêng có thể có 6 ảnh chụp các góc (TOP, BOT, SA...),
-        nhiều file ghi âm tiếng gõ (Android, iPhone) và các thông số cảm biến. Mỗi tổ hợp nạp
-        vào mạng là một sample.
+        Each durian fruit may have 6 camera views (TOP, BOT, SA...), multiple knock audio
+        recordings (Android, iPhone), and sensor parameters. Each combination fed into the
+        network forms one sample.
 
-        Batch được chấp nhận:
-        - input_mode="multimodal": `(images, audios, sensors, labels, fruit_ids[, extra...])` hoặc dict.
-        - input_mode đơn phương thức: `(x, labels, fruit_ids[, extra...])` hoặc dict `{x, label, fruit_id, ...}`.
-        Các trường phụ (vd `device`, `camera_angle`, `file`) được đưa thành cột trong DataFrame.
+        Accepted batch formats:
+        - input_mode="multimodal": `(images, audios, sensors, labels, fruit_ids[, extra...])` or dict.
+        - unimodal input_mode: `(x, labels, fruit_ids[, extra...])` or dict `{x, label, fruit_id, ...}`.
+        Extra fields (e.g., `device`, `camera_angle`, `file`) are added as columns in the DataFrame.
 
         Args:
-            test_loader: Dataloader tập kiểm thử.
-            mask_modality: Tên nhánh cần zero-mask để thử nghiệm độ bền vững ('audio', 'sensor', 'vision' hoặc None).
+            test_loader: Evaluation DataLoader.
+            mask_modality: Modality name to zero-mask for ablation ('audio', 'sensor', 'vision', or None).
 
         Returns:
-            pd.DataFrame: Bảng kết quả dự đoán chi tiết từng sample, gồm các cột
+            pd.DataFrame: Detailed per-sample predictions with columns
             `['fruit_id', 'camera_angle', 'true_label', 'pred_label', 'prob_unripe', 'prob_ripe',
-            'prob_overripe', 'is_correct', 'y_true', 'y_pred']` cùng các cột phụ.
+            'prob_overripe', 'is_correct', 'y_true', 'y_pred']` plus extra columns.
         """
-        logger.info(f"Bắt đầu đánh giá cấp độ sample (mask_modality={mask_modality})...")
+        logger.info(f"Starting sample-level evaluation (mask_modality={mask_modality})...")
         loader = test_loader or self.test_loader
         if loader is None:
-            raise ValueError("Chưa có DataLoader để đánh giá.")
+            raise ValueError("No DataLoader provided for evaluation.")
         if self.model is None:
-            raise RuntimeError("Chưa có mô hình để đánh giá.")
+            raise RuntimeError("No model provided for evaluation.")
         if mask_modality is not None and mask_modality not in ABLATION_MODALITIES:
-            raise ValueError(f"mask_modality phải thuộc {ABLATION_MODALITIES} hoặc None.")
+            raise ValueError(f"mask_modality must be one of {ABLATION_MODALITIES} or None.")
 
         multimodal = self.config.input_mode == "multimodal"
         self.model.eval()
@@ -394,48 +391,47 @@ class TeacherEvaluator:
 
         sample_df = pd.DataFrame(rows)
         if sample_df.empty:
-            raise ValueError("DataLoader không có mẫu nào.")
-        logger.info(f"Đã suy luận {len(sample_df)} sample, accuracy = {sample_df['is_correct'].mean():.4f}")
+            raise ValueError("DataLoader yielded 0 samples.")
+        logger.info(f"Evaluated {len(sample_df)} samples, accuracy = {sample_df['is_correct'].mean():.4f}")
         return sample_df
 
     # ------------------------------------------------------------------
-    # 3.3. Tổng hợp cấp độ quả
+    # 3.3. Fruit-level aggregation
     # ------------------------------------------------------------------
     def evaluate_fruit_level(
         self,
         sample_df: pd.DataFrame,
         strategy: Optional[str] = None,
     ) -> pd.DataFrame:
-        """Tổng hợp kết quả từ cấp độ mẫu đơn lẻ (nhiều góc ảnh/nhiều tiếng gõ) về từng quả sầu riêng (fruit_id).
+        """Aggregate sample-level predictions (multiple views/knocks) into fruit-level predictions (fruit_id).
 
-        Trong thực tế thu hoạch và thương phẩm, quyết định được đưa ra cho "từng quả sầu riêng"
-        thay vì từng ảnh chụp đơn lẻ. Do đó, đánh giá cấp độ quả (Fruit-level) phản ánh độ chính
-        xác thực tế của toàn hệ thống.
+        In real harvest and commercial grading, decisions are made per fruit rather than
+        per individual camera frame. Fruit-level evaluation reflects true system accuracy.
 
-        Chiến lược:
-        - 'mean_prob' (khuyến nghị): trung bình vector xác suất Softmax của các sample thuộc quả, chọn argmax.
-        - 'majority_vote': nhãn xuất hiện nhiều nhất; hòa phiếu thì chọn nhãn có tổng xác suất cao hơn.
+        Strategies:
+        - 'mean_prob' (recommended): average Softmax probability vectors across samples of a fruit, take argmax.
+        - 'majority_vote': most frequent predicted label; ties broken by highest summed probability.
 
         Args:
-            sample_df: Bảng kết quả cấp độ sample từ hàm `evaluate_sample_level()`.
-            strategy: Chiến lược tổng hợp ('mean_prob' hoặc 'majority_vote').
+            sample_df: Sample-level prediction DataFrame from `evaluate_sample_level()`.
+            strategy: Aggregation strategy ('mean_prob' or 'majority_vote').
 
         Returns:
-            pd.DataFrame: Bảng dự đoán hợp nhất cho từng quả gồm
+            pd.DataFrame: Per-fruit predictions with columns
             `['fruit_id', 'true_label', 'pred_label', 'prob_unripe_mean', 'prob_ripe_mean',
             'prob_overripe_mean', 'is_correct', 'n_samples', 'y_true', 'y_pred']`.
         """
         agg_strategy = strategy or self.config.fruit_aggregation_strategy
-        logger.info(f"Tổng hợp kết quả cấp độ quả (fruit_id) theo chiến lược: {agg_strategy}...")
+        logger.info(f"Aggregating fruit-level predictions (fruit_id) using strategy: {agg_strategy}...")
         if agg_strategy not in ("mean_prob", "majority_vote"):
-            raise ValueError("strategy phải là 'mean_prob' hoặc 'majority_vote'.")
+            raise ValueError("strategy must be 'mean_prob' or 'majority_vote'.")
 
         prob_cols = ["prob_unripe", "prob_ripe", "prob_overripe"]
         rows = []
         for fruit_id, group in sample_df.groupby("fruit_id", sort=True):
             true_labels = group["true_label"].unique()
             if len(true_labels) > 1:
-                logger.warning(f"Quả {fruit_id} có nhiều nhãn thật {list(true_labels)}; dùng nhãn xuất hiện nhiều nhất.")
+                logger.warning(f"Fruit {fruit_id} has multiple ground-truth labels {list(true_labels)}; using mode.")
             true_label = group["true_label"].mode().iloc[0]
             mean_probs = group[prob_cols].mean().to_numpy()
             if agg_strategy == "mean_prob":
@@ -458,7 +454,7 @@ class TeacherEvaluator:
                 "y_pred": pred_idx,
             })
         fruit_df = pd.DataFrame(rows)
-        logger.info(f"Đã tổng hợp {len(fruit_df)} quả, accuracy cấp quả = {fruit_df['is_correct'].mean():.4f}")
+        logger.info(f"Aggregated {len(fruit_df)} fruits, fruit-level accuracy = {fruit_df['is_correct'].mean():.4f}")
         return fruit_df
 
     # ------------------------------------------------------------------
@@ -471,25 +467,25 @@ class TeacherEvaluator:
         y_probs: Optional[np.ndarray] = None,
         prefix: str = "",
     ) -> Dict[str, float]:
-        """Tính toán toàn diện các chỉ số đánh giá phân loại (Classification Metrics).
+        """Compute comprehensive classification metrics.
 
-        Metric được tính:
-        - Accuracy, Balanced Accuracy, Macro-F1 (metric trọng tâm), Weighted-F1,
+        Computed metrics:
+        - Accuracy, Balanced Accuracy, Macro-F1 (primary metric), Weighted-F1,
           Macro Precision / Macro Recall.
-        - Precision / Recall / F1 / Support cho từng lớp (Unripe, Ripe, Overripe).
+        - Per-class Precision / Recall / F1 / Support (Unripe, Ripe, Overripe).
         - Cohen's Kappa, Matthews Correlation Coefficient (MCC).
-        - Khi có xác suất: ROC-AUC macro one-vs-rest, PR-AUC macro (Average Precision),
-          Log-loss đa lớp, Brier score đa lớp, Expected Calibration Error (ECE).
-        Metric không tính được (vd thiếu lớp trong y_true) trả về NaN kèm cảnh báo, không gây lỗi.
+        - When probabilities are provided: macro OvR ROC-AUC, macro PR-AUC (Average Precision),
+          multi-class Log-loss, multi-class Brier score, Expected Calibration Error (ECE).
+        Undefined metrics (e.g., missing class in y_true) return NaN with a warning instead of raising.
 
         Args:
-            y_true: Mảng nhãn thực tế (dạng số nguyên 0, 1, 2).
-            y_pred: Mảng nhãn mô hình dự đoán.
-            y_probs: Ma trận xác suất dự đoán kích thước (N, NUM_CLASSES).
-            prefix: Tiền tố gắn vào tên metric (ví dụ: 'sample_' hoặc 'fruit_').
+            y_true: Integer ground-truth labels (0, 1, 2).
+            y_pred: Integer predicted labels.
+            y_probs: Predicted probability matrix of shape (N, NUM_CLASSES).
+            prefix: Prefix prepended to metric keys (e.g., 'sample_' or 'fruit_').
 
         Returns:
-            Dict[str, float]: Từ điển chứa tên metric và giá trị tương ứng.
+            Dict[str, float]: Mapping from metric names to computed values.
         """
         from sklearn.metrics import (
             accuracy_score, average_precision_score, balanced_accuracy_score, cohen_kappa_score,
@@ -507,8 +503,8 @@ class TeacherEvaluator:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore")
                     metrics[name] = float(fn())
-            except Exception as exc:  # metric không xác định trên dữ liệu này
-                logger.warning(f"Không tính được {prefix}{name}: {exc}")
+            except Exception as exc:  # metric undefined on this data slice
+                logger.warning(f"Could not compute {prefix}{name}: {exc}")
                 metrics[name] = float("nan")
 
         safe("accuracy", lambda: accuracy_score(y_true, y_pred))
@@ -535,12 +531,12 @@ class TeacherEvaluator:
 
             def roc_auc() -> float:
                 if len(present) < NUM_CLASSES:
-                    raise ValueError(f"y_true chỉ có lớp {sorted(set(y_true.tolist()))}, ROC-AUC macro không xác định")
+                    raise ValueError(f"y_true only contains classes {sorted(set(y_true.tolist()))}; macro ROC-AUC undefined")
                 return roc_auc_score(y_true, probs, multi_class="ovr", average="macro", labels=labels)
 
             def pr_auc() -> float:
                 if not present:
-                    raise ValueError("không có lớp nào có cả mẫu dương và âm")
+                    raise ValueError("no class has both positive and negative samples")
                 return float(np.mean([average_precision_score(onehot[:, c], probs[:, c]) for c in present]))
 
             safe("roc_auc_ovr_macro", roc_auc)
@@ -553,7 +549,7 @@ class TeacherEvaluator:
 
     @staticmethod
     def _expected_calibration_error(y_true: np.ndarray, probs: np.ndarray, n_bins: int = 15) -> float:
-        """ECE theo độ tin cậy lớn nhất (top-label), chia đều [0, 1] thành n_bins."""
+        """Top-label Expected Calibration Error (ECE) over n_bins uniform bins in [0, 1]."""
         conf = probs.max(axis=1)
         correct = (probs.argmax(axis=1) == y_true).astype(float)
         edges = np.linspace(0.0, 1.0, n_bins + 1)
@@ -576,23 +572,23 @@ class TeacherEvaluator:
         self,
         test_loader: Optional[DataLoader] = None,
     ) -> Dict[str, Dict[str, float]]:
-        """Đánh giá đóng góp của từng phương thức cảm biến (Modality Contribution & Ablation Study).
+        """Evaluate modality contributions (Modality Contribution & Ablation Study).
 
-        Kỹ thuật này kiểm tra độ mạnh mẽ và sự phụ thuộc của Teacher vào từng giác quan:
-        1. Full Multi-Modal (Đầy đủ: RGB + Audio + Sensor): Hiệu năng chuẩn tối ưu.
-        2. w/o Audio (Zero-masking nhánh âm thanh): Đo lường âm thanh gõ đóng góp bao nhiêu % F1.
-        3. w/o Sensor (Zero-masking nhánh cảm biến/bảng số liệu/nhiệt/đa phổ): Đo lường độ đóng góp của cảm biến.
-        4. w/o Vision (Zero-masking nhánh ảnh RGB): Kiểm tra nếu "mù" thị giác thì Teacher phân loại ra sao.
+        Tests Teacher robustness and reliance on each sensory modality:
+        1. Full Multi-Modal (RGB + Audio + Sensor): optimal baseline performance.
+        2. w/o Audio (Zero-masking audio branch): measures Macro-F1 contribution of knock audio.
+        3. w/o Sensor (Zero-masking sensor branch): measures contribution of tabular/thermal/spectral cues.
+        4. w/o Vision (Zero-masking RGB branch): checks Teacher performance without visual input.
 
-        Chỉ chạy khi `config.input_mode == "multimodal"`; với mô hình đơn phương thức trả về dict rỗng.
-        Kết quả được lưu ra `<split>_ablation.csv`.
+        Only executed when `config.input_mode == "multimodal"`; returns empty dict for unimodal models.
+        Saves results to `<split>_ablation.csv`.
 
         Returns:
-            Dict[str, Dict[str, float]]: Bảng đối chiếu hiệu năng giữa các cấu hình phương thức.
+            Dict[str, Dict[str, float]]: Performance comparison across modality ablation settings.
         """
-        logger.info("Bắt đầu phân tích đóng góp phương thức (Modality Ablation Study)...")
+        logger.info("Starting Modality Ablation Study...")
         if self.config.input_mode != "multimodal":
-            logger.info(f"Bỏ qua ablation vì mô hình đơn phương thức (input_mode={self.config.input_mode}).")
+            logger.info(f"Skipping ablation for unimodal model (input_mode={self.config.input_mode}).")
             return {}
 
         settings = {"full": None, "wo_audio": "audio", "wo_sensor": "sensor", "wo_vision": "vision"}
@@ -611,7 +607,7 @@ class TeacherEvaluator:
         table.index.name = "setting"
         path = self.output_dir / f"{self._file_prefix()}ablation.csv"
         table.to_csv(path)
-        logger.info(f"Đã lưu bảng ablation: {path}")
+        logger.info(f"Saved ablation table: {path}")
         return results
 
     # ------------------------------------------------------------------
@@ -625,14 +621,14 @@ class TeacherEvaluator:
         save_name: str = "teacher_confusion_matrix.png",
         normalize: bool = True,
     ) -> str:
-        """Vẽ và lưu trữ biểu đồ nhiệt ma trận nhầm lẫn (Confusion Matrix Heatmap).
+        """Plot and save a confusion matrix heatmap.
 
-        - `normalize=True`: mỗi ô hiển thị tỷ lệ theo hàng (Recall từng lớp) kèm số lượng mẫu.
-        - `normalize=False`: hiển thị số lượng mẫu.
-        Trục X: nhãn dự đoán, trục Y: nhãn thật, theo thứ tự `CLASS_ORDER`.
+        - `normalize=True`: each cell displays row-normalized percentage (class Recall) and sample count.
+        - `normalize=False`: displays raw sample counts.
+        X-axis: predicted label, Y-axis: true label, ordered by `CLASS_ORDER`.
 
         Returns:
-            str: Đường dẫn file ảnh đã lưu.
+            str: Path to the saved PNG file.
         """
         from sklearn.metrics import confusion_matrix
 
@@ -647,7 +643,7 @@ class TeacherEvaluator:
         else:
             values, annot, fmt, vmax = cm, True, "d", None
 
-        # Dùng Figure + canvas Agg (chỉ lưu PNG): không phụ thuộc backend Tk, không đổi backend toàn cục
+        # Use Figure + Agg canvas (PNG output only): avoids Tk dependency or altering global backend
         fig = Figure(figsize=(6, 5))
         FigureCanvasAgg(fig)
         ax = fig.add_subplot()
@@ -670,28 +666,28 @@ class TeacherEvaluator:
         split_name: Optional[str] = None,
         load_checkpoint: bool = False,
     ) -> Dict[str, Any]:
-        """Quy trình đánh giá toàn diện mô hình Teacher (End-to-End Evaluation Pipeline).
+        """End-to-end Teacher evaluation pipeline.
 
-        Hàm điều phối chạy trọn vẹn toàn bộ các bước:
-        1. Load checkpoint Teacher model (khi `load_checkpoint=True`, hoặc khi chưa có model).
-        2. Đánh giá cấp độ sample và cấp độ quả (Full Multi-Modal).
-        3. Tính toán metrics tổng hợp (Sample-level & Fruit-level).
-        4. Chạy Ablation Study đo lường đóng góp của từng kênh (Audio / Sensor / Vision) — chỉ multimodal.
-        5. Xuất báo cáo ma trận nhầm lẫn dạng biểu đồ.
-        6. Lưu trữ tệp tổng hợp kết quả (JSON / CSV).
+        Coordinates the full evaluation workflow:
+        1. Load Teacher checkpoint (when `load_checkpoint=True` or model is None).
+        2. Evaluate sample-level and fruit-level predictions (Full Multi-Modal).
+        3. Compute comprehensive metrics (Sample-level & Fruit-level).
+        4. Run Modality Ablation Study (Audio / Sensor / Vision) — multimodal only.
+        5. Generate confusion matrix heatmaps.
+        6. Save structured reports (JSON / CSV / log).
 
-        File đầu ra trong `output_dir` (tiền tố `<split>_`):
-        `sample_predictions.csv`, `fruit_predictions.csv`, `metrics.csv` (dạng dài: model, split, level,
-        metric, value), `metrics.json`, `metrics_by_<cột>.csv` (vd theo thiết bị), `ablation.csv`,
+        Output files in `output_dir` (prefixed with `<split>_`):
+        `sample_predictions.csv`, `fruit_predictions.csv`, `metrics.csv` (long format: model, split, level,
+        metric, value), `metrics.json`, `metrics_by_<col>.csv` (e.g., by device/angle), `ablation.csv`,
         `cm_sample_counts.png`, `cm_sample_normalized.png`, `cm_fruit_counts.png`, `cm_fruit_normalized.png`, `eval.log`.
 
         Args:
-            test_loader: DataLoader cần chấm (mặc định `self.test_loader`).
-            split_name: Tên tập ("val", "test"...) làm tiền tố file (mặc định `config.split_name`).
-            load_checkpoint: True để nạp trọng số từ `config.teacher_checkpoint_path` trước khi chấm.
+            test_loader: DataLoader to evaluate (defaults to `self.test_loader`).
+            split_name: Split name ("val", "test", ...) used as filename prefix (defaults to `config.split_name`).
+            load_checkpoint: If True, load weights from `config.teacher_checkpoint_path` first.
 
         Returns:
-            Dict[str, Any]: Từ điển tổng hợp toàn bộ kết quả thực nghiệm.
+            Dict[str, Any]: Dictionary summarizing all experimental results.
         """
         if split_name is not None:
             self.config.split_name = split_name
@@ -700,7 +696,7 @@ class TeacherEvaluator:
         log_handler.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s"))
         logger.addHandler(log_handler)
         try:
-            logger.info("=== BẮT ĐẦU QUY TRÌNH ĐÁNH GIÁ TOÀN DIỆN TEACHER MODEL ===")
+            logger.info("=== STARTING FULL TEACHER EVALUATION PIPELINE ===")
             logger.info(f"model={self.config.model_name} | split={self.config.split_name} | "
                         f"input_mode={self.config.input_mode} | strategy={self.config.fruit_aggregation_strategy}")
             if self.model is None or load_checkpoint:
@@ -719,7 +715,7 @@ class TeacherEvaluator:
                                   "level": level, "metric": metric, "value": value})
             pd.DataFrame(long_rows).to_csv(self.output_dir / f"{prefix}metrics.csv", index=False)
 
-            # Metric tách theo cột phụ (vd thiết bị ghi âm, góc chụp)
+            # Metrics broken down by auxiliary columns (e.g., recording device, camera angle)
             by_group: Dict[str, Dict[str, Dict[str, float]]] = {}
             for col in ("device", "camera_angle"):
                 if col in sample_df and sample_df[col].astype(str).str.len().gt(0).any() \
@@ -763,7 +759,7 @@ class TeacherEvaluator:
                 json.dump(results, f, ensure_ascii=False, indent=2, default=float)
             logger.info(f"[{self.config.split_name}] sample Macro-F1 = {metrics['sample_macro_f1']:.4f} | "
                         f"fruit Macro-F1 = {metrics['fruit_macro_f1']:.4f}")
-            logger.info("=== HOÀN TẤT ĐÁNH GIÁ ===")
+            logger.info("=== EVALUATION COMPLETE ===")
             return results
         finally:
             logger.removeHandler(log_handler)
@@ -780,9 +776,9 @@ def evaluate(
     model_name: str = "model",
     fruit_aggregation_strategy: str = "mean_prob",
 ) -> Dict[str, Any]:
-    """Hàm tiện ích: chấm một mô hình trên một DataLoader và lưu toàn bộ kết quả vào `output_dir`.
+    """Convenience function: evaluate a model on a DataLoader and save all outputs to `output_dir`.
 
-    Ví dụ (script train nhánh âm thanh Tuần 2):
+    Example (Week 2 audio training script):
         from eval_teacher import evaluate
         results = evaluate(model, val_loader, "results", input_mode="audio", split_name="val",
                            model_name="audio_resnet18")
@@ -800,24 +796,24 @@ def evaluate(
 
 
 # ------------------------------------------------------------------------------
-# 4. CLASS XAI: TRỰC QUAN HÓA GRAD-CAM TRÊN TEACHER (TEACHER GRAD-CAM VISUALIZER)
+# 4. XAI CLASS: GRAD-CAM VISUALIZATION ON TEACHER
 # ------------------------------------------------------------------------------
 class TeacherGradCAMVisualizer:
-    """Bộ trích xuất và trực quan hóa bản đồ kích hoạt nhiệt (Grad-CAM Heatmaps) cho Teacher Model.
+    """Grad-CAM activation heatmap extractor and visualizer for the Teacher Model.
 
-    Mục tiêu khoa học (Tham chiếu Mục 1.4 đặc tả đề tài):
-    - Dưới sự định hướng của tín hiệu âm thanh và cảm biến vật lý trong mạng Teacher,
-      các bộ lọc không gian của nhánh Vision tập trung vào những vùng hình thái nào trên vỏ sầu riêng?
-    - Trực quan hóa để đối chiếu: Liệu mạng có thật sự nhìn vào rãnh gai (groove expansion),
-      vùng đĩa cuống (pedicel disc), hay bị phân tâm bởi phông nền và điều kiện ánh sáng?
+    Scientific objective (Specification Section 1.4):
+    - Guided by acoustic and physical sensor cues inside the Teacher network,
+      which morphological regions on the durian shell do Vision spatial filters focus on?
+    - Visual inspection: does the network attend to spine grooves (groove expansion) and
+      pedicel disc, or get distracted by background and lighting variations?
 
-    Trách nhiệm chính của class:
-    1. Đăng ký Hook (Forward Hook & Backward Hook) vào tầng tích chập mục tiêu (Target Convolutional Layer).
-    2. Lan truyền xuôi (Forward pass) để lưu trữ Feature Maps của ảnh.
-    3. Lan truyền ngược (Backward pass) với gradient của lớp quan tâm để tính toán trọng số quan trọng $\alpha_k$.
-    4. Tổng hợp bản đồ kích hoạt tuyến tính có trọng số, áp dụng hàm ReLU:
+    Class responsibilities:
+    1. Register Forward & Backward Hooks on the Target Convolutional Layer.
+    2. Run forward pass to store spatial feature maps.
+    3. Run backward pass with target class gradients to compute importance weights $\alpha_k$.
+    4. Compute weighted linear combination followed by ReLU:
        $$L_{Grad-CAM}^c = ReLU\\left(\\sum_k \\alpha_k^c A^k\\right)$$
-    5. Resize bản đồ nhiệt về kích thước ảnh gốc, nội suy màu (Colormap) và chập (Overlay) lên ảnh RGB.
+    5. Resize heatmap to input image size, apply colormap, and overlay on the RGB image.
     """
 
     def __init__(
@@ -826,12 +822,12 @@ class TeacherGradCAMVisualizer:
         target_layer_name: str,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
     ) -> None:
-        """Khởi tạo Grad-CAM Visualizer cho Teacher.
+        """Initialize the Grad-CAM Visualizer for Teacher.
 
         Args:
-            model: Mô hình Multi-Modal Teacher.
-            target_layer_name: Tên phân cấp của tầng tích chập cuối cùng (ví dụ: 'vision_backbone.layer4').
-            device: Thiết bị tính toán ('cuda' hoặc 'cpu').
+            model: Multi-Modal Teacher model.
+            target_layer_name: Hierarchical module name of the target conv layer (e.g., 'vision_backbone.layer4').
+            device: Compute device ('cuda' or 'cpu').
         """
         self.model = model
         self.target_layer_name = target_layer_name
@@ -841,22 +837,22 @@ class TeacherGradCAMVisualizer:
         self.activations: Optional[torch.Tensor] = None
         self._hooks: List[Any] = []
 
-        # Đăng ký hook vào tầng mục tiêu
+        # Register hooks on target layer
         self._register_hooks()
 
     def _register_hooks(self) -> None:
-        """Tìm tầng layer theo tên và đăng ký forward_hook cùng backward_hook.
+        """Find layer by name and register forward_hook and backward_hook.
 
-        Hướng dẫn thực hiện cho Member 2 (TODO):
+        Implementation guide for Member 2 (TODO):
         ---------------------------------------------------------
-        1. Duyệt qua `dict(self.model.named_modules())` để tìm sub-module trùng tên `self.target_layer_name`.
-        2. Đăng ký Forward Hook để trích xuất `self.activations`:
+        1. Look up `self.target_layer_name` in `dict(self.model.named_modules())`.
+        2. Register Forward Hook to capture `self.activations`:
            `def forward_hook(module, input, output): self.activations = output.detach()`
-        3. Đăng ký Backward Hook để trích xuất `self.gradients`:
+        3. Register Backward Hook to capture `self.gradients`:
            `def backward_hook(module, grad_in, grad_out): self.gradients = grad_out[0].detach()`
-        4. Lưu các handle hook vào `self._hooks` để có thể gỡ bỏ (remove) khi không sử dụng.
+        4. Store hook handles in `self._hooks` so they can be removed cleanly later.
         """
-        # TODO [Member 2]: Hiện thực hóa việc đăng ký forward và backward hooks
+        # TODO [Member 2]: Implement forward and backward hook registration
         pass
 
     def generate_cam(
@@ -866,35 +862,35 @@ class TeacherGradCAMVisualizer:
         sensor_tensor: torch.Tensor,
         target_class: Optional[int] = None,
     ) -> np.ndarray:
-        """Tạo bản đồ nhiệt Grad-CAM chuẩn hóa cho một mẫu đầu vào đa phương thức.
+        """Generate normalized Grad-CAM heatmap for a single multimodal sample.
 
-        Hướng dẫn thực hiện cho Member 2 (TODO):
+        Implementation guide for Member 2 (TODO):
         ---------------------------------------------------------
-        1. Đảm bảo tensors có shape batch: `(1, C, H, W)` cho ảnh, `(1, 1, n_mels, T)` cho audio, `(1, D)` cho sensor.
-        2. Bật chế độ gradient cho ảnh/tính toán nếu cần: `self.model.zero_grad()`.
-        3. Forward pass qua Teacher: `logits, _ = self.model(image_tensor, audio_tensor, sensor_tensor)`.
-        4. Nếu `target_class is None`: lấy lớp có logit cao nhất `target_class = logits.argmax(dim=-1).item()`.
-        5. Tính điểm số mục tiêu: `score = logits[0, target_class]`.
-        6. Backward pass để kích hoạt backward hook: `score.backward()`.
-        7. Tính trọng số $\\alpha_k = \\frac{1}{Z} \\sum_i \\sum_j \\frac{\\partial Y^c}{\\partial A_{i,j}^k}$
-           (Global Average Pooling trên gradient).
-        8. Tính tổ hợp tuyến tính các feature maps: $CAM = \\sum_k \\alpha_k A^k$.
-        9. Áp dụng ReLU để chỉ giữ lại các đặc trưng có đóng góp tích cực đến lớp mục tiêu: $CAM = ReLU(CAM)$.
-        10. Chuẩn hóa CAM về khoảng $[0, 1]$ qua phép biến đổi Min-Max.
-        11. Resize CAM về kích thước không gian ban đầu của ảnh `(H, W)`.
+        1. Ensure batched shapes: `(1, C, H, W)` for image, `(1, 1, n_mels, T)` for audio, `(1, D)` for sensor.
+        2. Zero gradients: `self.model.zero_grad()`.
+        3. Forward pass through Teacher: `logits, _ = self.model(image_tensor, audio_tensor, sensor_tensor)`.
+        4. If `target_class is None`: pick top predicted class `target_class = logits.argmax(dim=-1).item()`.
+        5. Compute target score: `score = logits[0, target_class]`.
+        6. Backward pass to trigger backward hook: `score.backward()`.
+        7. Compute weights $\\alpha_k = \\frac{1}{Z} \\sum_i \\sum_j \\frac{\\partial Y^c}{\\partial A_{i,j}^k}$
+           (Global Average Pooling over gradients).
+        8. Compute linear combination of feature maps: $CAM = \\sum_k \\alpha_k A^k$.
+        9. Apply ReLU to keep features with positive contribution: $CAM = ReLU(CAM)$.
+        10. Min-Max normalize CAM to $[0, 1]$.
+        11. Resize CAM to original image spatial resolution `(H, W)`.
 
         Args:
-            image_tensor: Tensor ảnh RGB đầu vào.
-            audio_tensor: Tensor biểu đồ Mel-Spectrogram âm thanh gõ.
-            sensor_tensor: Tensor vector đặc trưng cảm biến tích hợp.
-            target_class: Chỉ số lớp cần giải thích (0: Unripe, 1: Ripe, 2: Overripe). Nếu None, tự lấy lớp dự đoán.
+            image_tensor: Input RGB image tensor.
+            audio_tensor: Input knock Mel-Spectrogram tensor.
+            sensor_tensor: Input integrated sensor feature vector tensor.
+            target_class: Target class index (0: Unripe, 1: Ripe, 2: Overripe). Defaults to top prediction.
 
         Returns:
-            np.ndarray: Ma trận 2D kích thước (H, W) với giá trị trong đoạn [0, 1].
+            np.ndarray: 2D array of shape (H, W) with values in [0, 1].
         """
-        # TODO [Member 2]: Hiện thực hóa thuật toán Grad-CAM tại đây
+        # TODO [Member 2]: Implement Grad-CAM algorithm here
         raise NotImplementedError(
-            "TODO [Member 2]: Hãy hiện thực hóa hàm generate_cam() theo các bước trong docstring!"
+            "TODO [Member 2]: Please implement generate_cam() following the docstring steps!"
         )
 
     def overlay_cam_on_image(
@@ -904,28 +900,28 @@ class TeacherGradCAMVisualizer:
         alpha: float = 0.5,
         colormap: int = 2,  # cv2.COLORMAP_JET
     ) -> np.ndarray:
-        """Chập bản đồ nhiệt Grad-CAM lên ảnh gốc để hiển thị trực quan.
+        """Overlay Grad-CAM heatmap onto the original RGB image for visual display.
 
-        Hướng dẫn thực hiện cho Member 2 (TODO):
+        Implementation guide for Member 2 (TODO):
         ---------------------------------------------------------
-        1. Đảm bảo `rgb_image` có giá trị trong đoạn [0, 255] kiểu `uint8`.
-        2. Biến đổi `cam_mask` (giá trị 0..1) sang uint8: `cam_uint8 = np.uint8(255 * cam_mask)`.
-        3. Dùng OpenCV để tô màu nhiệt: `heatmap = cv2.applyColorMap(cam_uint8, colormap)`.
-        4. Trộn hai ảnh theo trọng số: `overlay = cv2.addWeighted(rgb_image, 1 - alpha, heatmap, alpha, 0)`.
-        5. Trả về ảnh RGB đã overlay sẵn sàng để lưu hoặc vẽ bằng matplotlib.
+        1. Ensure `rgb_image` is `uint8` in range [0, 255].
+        2. Convert `cam_mask` (0..1) to uint8: `cam_uint8 = np.uint8(255 * cam_mask)`.
+        3. Apply OpenCV colormap: `heatmap = cv2.applyColorMap(cam_uint8, colormap)`.
+        4. Blend images: `overlay = cv2.addWeighted(rgb_image, 1 - alpha, heatmap, alpha, 0)`.
+        5. Return overlaid RGB image ready for saving or plotting with matplotlib.
 
         Args:
-            rgb_image: Ảnh gốc RGB (H, W, 3) dạng uint8.
-            cam_mask: Mặt nạ nhiệt Grad-CAM (H, W) trong khoảng [0, 1].
-            alpha: Hệ số hòa trộn độ trong suốt của bản đồ nhiệt (0.0 đến 1.0).
-            colormap: Mã màu OpenCV (mặc định COLORMAP_JET).
+            rgb_image: Original RGB image (H, W, 3) uint8.
+            cam_mask: Grad-CAM heatmap mask (H, W) in [0, 1].
+            alpha: Heatmap overlay transparency factor (0.0 to 1.0).
+            colormap: OpenCV colormap code (default COLORMAP_JET).
 
         Returns:
-            np.ndarray: Ảnh RGB (H, W, 3) đã overlay bản đồ nhiệt.
+            np.ndarray: Overlaid RGB image (H, W, 3).
         """
-        # TODO [Member 2]: Hiện thực hóa hàm overlay_cam_on_image()
+        # TODO [Member 2]: Implement overlay_cam_on_image()
         raise NotImplementedError(
-            "TODO [Member 2]: Hãy hoàn thiện hàm overlay_cam_on_image()!"
+            "TODO [Member 2]: Please implement overlay_cam_on_image()!"
         )
 
     def export_gradcam_gallery(
@@ -934,70 +930,70 @@ class TeacherGradCAMVisualizer:
         save_dir: str,
         num_samples_per_class: int = 5,
     ) -> None:
-        """Xuất bộ sưu tập ảnh Grad-CAM cho các quả đại diện (Chưa chín, Chín, Chín quá).
+        """Export a gallery of Grad-CAM visualizations for representative fruits (Unripe, Ripe, Overripe).
 
-        GỢI Ý METRIC ĐÁNH GIÁ CHẤT LƯỢNG GRAD-CAM (Member 2 tham khảo):
+        SUGGESTED GRAD-CAM EVALUATION METRICS (Reference for Member 2):
         ---------------------------------------------------------
-        1. Energy-based Pointing Game: Đo tỷ lệ phần trăm năng lượng kích hoạt nằm trọn bên trong
-           vùng quả sầu riêng (loại bỏ kích hoạt sai lệch ngoài phông nền).
-        2. Attention Dispersion / Concentration: Đo độ tập trung của vùng chú ý (vùng chú ý hội tụ sắc nét
-           hay bị phân tán loãng khắp ảnh).
-        3. Morphological Alignment Score: Đo lường mức độ tương quan giữa vùng chú ý nhiệt với các rãnh gai
-           (sử dụng các bộ lọc phát hiện cạnh/rãnh như Sobel / Frangi filter).
+        1. Energy-based Pointing Game: Percentage of activation energy falling inside the
+           durian fruit mask (filtering out spurious background activations).
+        2. Attention Dispersion / Concentration: Spatial concentration of the attention map
+           (sharp focused regions vs. diffused attention).
+        3. Morphological Alignment Score: Correlation between high-attention regions and spine
+           grooves (using edge/ridge detectors such as Sobel or Frangi filters).
 
-        >>> LƯU Ý ĐẶC BIỆT DÀNH CHO MEMBER 2:
-        >>> Các tiêu chí trên là gợi ý; thành viên phụ trách CẦN TỰ TÌM THÊM các metric khác
-        >>> để định lượng độ tin cậy và giải thích của Grad-CAM một cách khoa học.
+        >>> SPECIAL NOTE FOR MEMBER 2:
+        >>> These metrics are suggestions; please explore additional quantitative XAI metrics
+        >>> to evaluate Grad-CAM faithfulness and interpretability scientifically.
 
         Args:
-            samples_list: Danh sách các mẫu kiểm thử kèm thông tin đường dẫn và nhãn.
-            save_dir: Thư mục lưu ảnh trực quan hóa.
-            num_samples_per_class: Số lượng mẫu xuất bản đồ nhiệt cho mỗi lớp độ chín.
+            samples_list: List of test sample dicts containing file paths and labels.
+            save_dir: Output directory for saving visualization images.
+            num_samples_per_class: Number of samples exported per ripeness class.
         """
-        # TODO [Member 2]: Duyệt qua các mẫu đại diện, gọi generate_cam, overlay và lưu thành ảnh so sánh
-        # [Ảnh gốc | Grad-CAM Heatmap | Overlay Heatmap]
+        # TODO [Member 2]: Iterate over representative samples, call generate_cam + overlay, and save comparisons
+        # [Original Image | Grad-CAM Heatmap | Overlay Heatmap]
         pass
 
 
 # ------------------------------------------------------------------------------
-# 5. CLASS PHÂN TÍCH LỖI VÀ GIỚI HẠN VẬT LÝ (TEACHER ERROR ANALYZER)
+# 5. ERROR ANALYSIS AND PHYSICAL LIMITATION ANALYSIS CLASS
 # ------------------------------------------------------------------------------
 class TeacherErrorAnalyzer:
-    """Bộ phân tích chuyên sâu các trường hợp dự đoán sai lệch của mô hình Teacher.
+    """In-depth error analyzer for Teacher model misclassifications.
 
-    Tham chiếu Mục 1.4 (Đóng góp 4):
-    Phân tích các ca lỗi (Error Analysis) nhằm tìm hiểu nguyên nhân sinh hóa/vật lý:
-    - Tại sao quả chín nhưng mô hình đoán nhầm là chưa chín? (Ví dụ: vỏ quả dày bất thường,
-      độ ngọt TSS đã đạt nhưng độ rỗng thịt quả chưa phát triển nên âm gõ còn đục).
-    - Phân tích tương quan giữa các ca đoán sai với các đặc tính cảm biến
-      (Firmness, TSS, Dry Matter, Khối lượng, Nhiệt độ chênh lệch delta_temp_fg_bg).
+    Reference Section 1.4 (Contribution 4):
+    Analyze failure cases to uncover biochemical / physical causes:
+    - Why is a ripe fruit misclassified as unripe? (e.g., unusually thick shell,
+      target TSS achieved but internal cavity resonance not yet developed so knock stays dull).
+    - Correlate errors with sensor readings
+      (Firmness, TSS, Dry Matter, Weight, thermal contrast delta_temp_fg_bg).
     """
 
     def __init__(self, output_dir: str) -> None:
-        """Khởi tạo bộ phân tích lỗi.
+        """Initialize error analyzer.
 
         Args:
-            output_dir: Thư mục lưu trữ biểu đồ và báo cáo lỗi.
+            output_dir: Directory for saving error analysis plots and reports.
         """
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def extract_failure_cases(self, fruit_level_df: pd.DataFrame) -> pd.DataFrame:
-        """Lọc và phân loại tất cả các ca dự đoán sai ở cấp độ quả.
+        """Filter and categorize all misclassified fruits at the fruit level.
 
-        Hướng dẫn thực hiện cho Member 2 (TODO):
+        Implementation guide for Member 2 (TODO):
         ---------------------------------------------------------
-        1. Lọc các dòng có `is_correct == False` (hoặc `true_label != pred_label`).
-        2. Gắn nhãn loại lỗi chi tiết (Error Subtype):
-           - 'Unripe_as_Ripe': Quả non bị đoán nhầm là chín (Lỗi nghiêm trọng: bán nhầm quả non).
-           - 'Ripe_as_Unripe': Quả chín bị đoán nhầm là non (Bỏ sót thời điểm thu hoạch tối ưu).
-           - 'Ripe_as_Overripe': Quả chín tới bị đoán là quá chín.
-           - 'Overripe_as_Ripe': Quả quá chín/lên men bị đoán là chín ngon.
-        3. Trả về DataFrame danh sách các ca lỗi kèm xác suất tin cậy của mô hình.
+        1. Filter rows where `is_correct == False` (or `true_label != pred_label`).
+        2. Tag detailed Error Subtype:
+           - 'Unripe_as_Ripe': Unripe fruit predicted as Ripe (Critical error: selling immature fruit).
+           - 'Ripe_as_Unripe': Ripe fruit predicted as Unripe (Missed optimal harvest window).
+           - 'Ripe_as_Overripe': Ripe fruit predicted as Overripe.
+           - 'Overripe_as_Ripe': Overripe/fermenting fruit predicted as Ripe.
+        3. Return DataFrame of failure cases with model confidence probabilities.
         """
-        # TODO [Member 2]: Hiện thực hóa hàm lọc lỗi tại đây
+        # TODO [Member 2]: Implement failure extraction logic here
         raise NotImplementedError(
-            "TODO [Member 2]: Hãy hoàn thiện hàm extract_failure_cases()!"
+            "TODO [Member 2]: Please implement extract_failure_cases()!"
         )
 
     def correlate_errors_with_physical_properties(
@@ -1005,88 +1001,87 @@ class TeacherErrorAnalyzer:
         failures_df: pd.DataFrame,
         manifest_df: pd.DataFrame,
     ) -> pd.DataFrame:
-        """Phân tích tương quan giữa các ca lỗi và các đặc tính sinh hóa / cảm biến.
+        """Analyze correlations between failure cases and biochemical / sensor properties.
 
-        Hướng dẫn thực hiện cho Member 2 (TODO):
+        Implementation guide for Member 2 (TODO):
         ---------------------------------------------------------
-        1. Merge `failures_df` với `manifest_df` dựa trên `fruit_id`.
-        2. Trích xuất các thuộc tính: `Firmness_AVE`, `TSS_AVE`, `Dry_Matter_AVE`,
+        1. Merge `failures_df` with `manifest_df` on `fruit_id`.
+        2. Extract attributes: `Firmness_AVE`, `TSS_AVE`, `Dry_Matter_AVE`,
            `Harvest_Weight`, `fg_mean_temp`, `delta_temp_fg_bg`.
-        3. So sánh phân phối của nhóm đoán sai (Failures) với nhóm đoán đúng (Successes)
-           thông qua biểu đồ Boxplot hoặc Violin plot.
-        4. Kiểm tra giả thuyết vật lý: Các ca lỗi có nằm ở vùng ranh giới phân bố
-           (boundary threshold) giữa các trạng thái độ chín hay không?
+        3. Compare distributions of Failures vs. Successes via Boxplot or Violin plot.
+        4. Test physical hypothesis: do failure cases cluster near boundary thresholds
+           between ripeness stages?
         """
-        # TODO [Member 2]: Hiện thực hóa hàm phân tích tương quan lỗi
+        # TODO [Member 2]: Implement error correlation analysis here
         raise NotImplementedError(
-            "TODO [Member 2]: Hãy hiện thực hóa correlate_errors_with_physical_properties()!"
+            "TODO [Member 2]: Please implement correlate_errors_with_physical_properties()!"
         )
 
 
 # ------------------------------------------------------------------------------
-# 6. HÀM MAIN / CLI THỰC THI THỬ NGHIỆM
+# 6. MAIN / CLI EXECUTION
 # ------------------------------------------------------------------------------
 def parse_args():
-    """Hàm phân tích đối số dòng lệnh khi chạy script trực tiếp."""
+    """Parse command-line arguments when executing the script directly."""
     import argparse
 
     parser = argparse.ArgumentParser(
-        description="Đánh giá mô hình Multi-Modal Teacher & Trực quan hóa Grad-CAM"
+        description="Evaluate Multi-Modal Teacher & Visualize Grad-CAM"
     )
     parser.add_argument(
         "--checkpoint",
         type=str,
         default="checkpoints/teacher_best.pth",
-        help="Đường dẫn file trọng số Teacher model",
+        help="Path to Teacher model weights file",
     )
     parser.add_argument(
         "--manifest",
         type=str,
         default="data/final/final_multimodal_manifest.csv",
-        help="Đường dẫn Master Manifest CSV",
+        help="Path to Master Manifest CSV",
     )
     parser.add_argument(
         "--test-dir",
         type=str,
         default="data/final/test",
-        help="Đường dẫn thư mục tập Test",
+        help="Path to Test split directory",
     )
     parser.add_argument(
         "--output-dir",
         type=str,
         default="workspaces/member2_audio/03_test_eval_teacher_and_gradcam/results",
-        help="Thư mục lưu báo cáo kết quả và hình ảnh",
+        help="Directory to save evaluation reports and figures",
     )
     parser.add_argument(
         "--batch-size",
         type=int,
         default=16,
-        help="Kích thước batch khi nạp dữ liệu",
+        help="Evaluation DataLoader batch size",
     )
     parser.add_argument(
         "--input-mode",
         type=str,
         default="multimodal",
         choices=["multimodal", "audio", "vision", "sensor"],
-        help="Chế độ đầu vào của mô hình (multimodal cho Teacher, audio/vision/sensor cho mô hình đơn phương thức)",
+        help="Model input mode (multimodal for Teacher, audio/vision/sensor for unimodal models)",
     )
     parser.add_argument(
         "--split-name",
         type=str,
         default="test",
-        help="Tên tập đang chấm (val/test), dùng làm tiền tố tên file kết quả",
+        help="Evaluated split name (val/test), used as output filename prefix",
     )
     parser.add_argument(
         "--model-name",
         type=str,
         default="teacher",
-        help="Tên mô hình ghi vào bảng metrics",
+        help="Model name recorded in metrics tables",
     )
     parser.add_argument(
         "--device",
         type=str,
         default="cuda" if torch.cuda.is_available() else "cpu",
-        help="Thiết bị tính toán (cuda hoặc cpu)",
+        help="Compute device (cuda or cpu)",
     )
     return parser.parse_args()
 
@@ -1094,8 +1089,8 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     print("=" * 80)
-    print(" SCRIPT ĐÁNH GIÁ MULTI-MODAL TEACHER & TRỰC QUAN HÓA GRAD-CAM (XAI)")
-    print(" Phụ trách: Member 2 (Audio & Multi-Modal Evaluation)")
+    print(" MULTI-MODAL TEACHER EVALUATION & GRAD-CAM VISUALIZATION (XAI)")
+    print(" Responsible: Member 2 (Audio & Multi-Modal Evaluation)")
     print("=" * 80)
 
     config = TeacherEvaluatorConfig(
@@ -1111,14 +1106,14 @@ if __name__ == "__main__":
     )
 
     evaluator = TeacherEvaluator(config=config)
-    print(f"\n[INFO] Đã khởi tạo cấu hình đánh giá Teacher.")
-    print(f"[INFO] File trọng số mục tiêu: {config.teacher_checkpoint_path}")
-    print(f"[INFO] Kết quả sẽ được lưu tại: {config.output_dir}")
-    print("\n[HƯỚNG DẪN THỰC THI]:")
-    print("1. Phần đánh giá (TeacherEvaluator) đã hoàn thiện; Grad-CAM và phân tích lỗi sẽ làm ở Tuần 4.")
-    print("2. Kiến trúc Teacher do Lead định nghĩa ở Tuần 3: khởi tạo model rồi dùng trong code Python:")
+    print(f"\n[INFO] Initialized Teacher evaluation configuration.")
+    print(f"[INFO] Target checkpoint: {config.teacher_checkpoint_path}")
+    print(f"[INFO] Results will be saved to: {config.output_dir}")
+    print("\n[USAGE GUIDE]:")
+    print("1. Evaluation pipeline (TeacherEvaluator) is ready; Grad-CAM and error analysis are Week 4 items.")
+    print("2. For Teacher architecture: instantiate model then run in Python:")
     print("     from eval_teacher import TeacherEvaluator, TeacherEvaluatorConfig")
     print("     ev = TeacherEvaluator(TeacherEvaluatorConfig(...), model=model, test_loader=loader)")
     print("     ev.run_full_evaluation_pipeline(load_checkpoint=True)")
-    print("3. Mô hình đơn phương thức: from eval_teacher import evaluate; evaluate(model, loader, out_dir, input_mode='audio')")
+    print("3. Unimodal models: from eval_teacher import evaluate; evaluate(model, loader, out_dir, input_mode='audio')")
 

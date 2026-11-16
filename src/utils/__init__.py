@@ -1,4 +1,4 @@
-"""Tiện ích dùng chung toàn dự án."""
+"""Project-wide shared utilities."""
 
 from src.utils.common import (
     CLASS_ORDER,

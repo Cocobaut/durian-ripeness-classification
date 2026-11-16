@@ -1,4 +1,4 @@
-"""Tiện ích dùng chung toàn dự án (seed, đường dẫn, hằng số lớp)."""
+"""Project-wide shared utilities (seeds, paths, class constants)."""
 
 from __future__ import annotations
 
@@ -11,17 +11,17 @@ from typing import Iterable, Optional, Union
 import numpy as np
 import torch
 
-CLASS_ORDER = ["Unripe", "Ripe", "Overripe"]  # 0: Chưa chín, 1: Chín, 2: Chín quá
+CLASS_ORDER = ["Unripe", "Ripe", "Overripe"]  # 0: Unripe, 1: Ripe, 2: Overripe
 LABEL_TO_IDX = {c: i for i, c in enumerate(CLASS_ORDER)}
 IDX_TO_LABEL = {i: c for i, c in enumerate(CLASS_ORDER)}
 NUM_CLASSES = len(CLASS_ORDER)
 
-# Thư mục gốc repo = 2 cấp trên file này (src/utils/common.py)
+# Repository root = 2 levels above this file (src/utils/common.py)
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def add_to_sys_path(*paths: Union[str, Path]) -> None:
-    """Thêm thư mục vào sys.path (dùng cho các workspace có tên bắt đầu bằng số, không import được như package)."""
+    """Add directories to sys.path (for workspace folders starting with digits that cannot be imported as packages)."""
     for p in paths:
         s = str(Path(p).resolve())
         if s not in sys.path:
@@ -39,13 +39,13 @@ def set_seed(seed: int = 42, deterministic: bool = False) -> None:
 
 
 def resolve_path(path: Union[str, Path], root: Optional[Path] = None) -> Path:
-    """Đường dẫn tương đối được tính từ thư mục gốc repo (không phụ thuộc thư mục đang đứng)."""
+    """Resolve relative paths from the repository root (independent of current working directory)."""
     p = Path(path)
     return p if p.is_absolute() else (root or PROJECT_ROOT) / p
 
 
 def first_existing(candidates: Iterable[Union[str, Path]], root: Optional[Path] = None) -> Optional[Path]:
-    """Trả về đường dẫn đầu tiên tồn tại trong danh sách ứng viên (None nếu không có)."""
+    """Return the first existing path among candidates (or None if none exist)."""
     for c in candidates:
         if c is None:
             continue

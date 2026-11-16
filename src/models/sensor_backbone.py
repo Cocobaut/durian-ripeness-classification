@@ -1,7 +1,7 @@
-"""Mô hình MLP Sensor Backbone phục vụ huấn luyện đơn phương thức & Multimodal Fusion.
+"""MLP Sensor Backbone model for unimodal training and Multimodal Fusion.
 
-Phụ trách: Member 3 (Nhánh Cảm biến / Bảng số liệu)
-Dự án: Phân loại độ chín sầu riêng bằng chưng cất tri thức đa phương thức (CMKD)
+Responsible: Member 3 (Sensor / Tabular Modality)
+Project: Durian Ripeness Classification via Cross-Modal Knowledge Distillation (CMKD)
 """
 
 from typing import Sequence, Tuple, Union
@@ -10,11 +10,11 @@ import torch.nn as nn
 
 
 class SensorBackbone(nn.Module):
-    """Mạng MLP trích xuất vector đặc trưng cảm biến f_sensor in R^{latent_dim}.
+    """MLP network extracting sensor feature vector f_sensor in R^{latent_dim}.
     
-    Kiến trúc gồm các khối Linear -> LayerNorm -> ReLU -> Dropout,
-    cuối cùng chiếu về latent_dim (mặc định 32) và phân loại ra 3 lớp độ chín.
-    Sử dụng LayerNorm để hoạt động ổn định trên mọi batch size (kể cả batch_size=1).
+    Architecture consists of Linear -> LayerNorm -> ReLU -> Dropout blocks,
+    finally projecting to latent_dim (default 32) and classifying into 3 ripeness classes.
+    Uses LayerNorm for stability across any batch size (including batch_size=1).
     """
 
     def __init__(
@@ -49,11 +49,11 @@ class SensorBackbone(nn.Module):
         x: torch.Tensor,
         return_latent: bool = False
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """Lan truyền xuôi: trả về logits hoặc (logits, f_sensor)."""
+        """Forward pass: returns logits or (logits, f_sensor)."""
         feat = self.encoder(x)
         logits = self.classifier(feat)
         return (logits, feat) if return_latent else logits
 
     def extract_features(self, x: torch.Tensor) -> torch.Tensor:
-        """Trích xuất vector đặc trưng f_sensor in R^{latent_dim} cho Fusion Module."""
+        """Extract feature vector f_sensor in R^{latent_dim} for the Fusion Module."""
         return self.encoder(x)

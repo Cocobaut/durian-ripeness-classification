@@ -1,4 +1,4 @@
-"""Các hàm mất mát (Loss functions) cho phân loại và chưng cất tri thức."""
+"""Loss functions for classification and cross-modal knowledge distillation."""
 
 from src.losses.classification_loss import (
     DEFAULT_ORDINAL_COST_MATRIX,

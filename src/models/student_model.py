@@ -1,19 +1,19 @@
-"""Mô hình Vision-Only Student (Giai đoạn 2 của CMKD).
+"""Vision-Only Student Model (Stage 2 of CMKD).
 
-Dự án: Phân loại độ chín sầu riêng bằng Chưng cất tri thức Đa phương thức (CMKD)
-Tham chiếu đặc tả: Mục 1.3.3 (Chưng cất tri thức liên phương thức sang Vision-Only Student).
+Project: Durian Ripeness Classification via Cross-Modal Knowledge Distillation (CMKD)
+Specification reference: Section 1.3.3 (Cross-Modal Knowledge Distillation to Vision-Only Student).
 
-Kiến trúc:
-    img [B, 3, 384, 384] -> VisionBackbone (vd ConvNeXt V2-Tiny) -> f_img [B, d_S] ┬-> Classifier     -> logits [B, 3]
-                                                                                    └-> ProjectionHead -> f_proj [B, 256]
+Architecture:
+    img [B, 3, 384, 384] -> VisionBackbone (e.g., ConvNeXt V2-Tiny) -> f_img [B, d_S] ┬-> Classifier     -> logits [B, 3]
+                                                                                     └-> ProjectionHead -> f_proj [B, 256]
 
-Cơ chế hoạt động:
-- Khi huấn luyện (Giai đoạn 2):
-  `forward(img, return_features=True)` trả về `(logits, f_img, f_proj)`.
-  + `logits` dùng cho L_CE (nhãn thật) và L_KD (khớp nhãn mềm với logits của Teacher).
-  + `f_proj = phi(f_img)` [B, 256] dùng cho L_feat (căn chỉnh không gian ẩn với f_mm [B, 256] của Teacher).
-- Khi suy luận thực tế (Inference / Test):
-  `forward(img)` chỉ cần ảnh RGB duy nhất, trả về `logits` [B, 3] (không cần micro, cảm biến hay Teacher).
+Operation:
+- During training (Stage 2):
+  `forward(img, return_features=True)` returns `(logits, f_img, f_proj)`.
+  + `logits` are used for L_CE (hard labels) and L_KD (soft logit matching with Teacher).
+  + `f_proj = phi(f_img)` [B, 256] is used for L_feat (latent space alignment with Teacher's f_mm [B, 256]).
+- During inference / testing:
+  `forward(img)` requires only a single RGB image and returns `logits` [B, 3] (no microphone, sensors, or Teacher required).
 """
 
 from __future__ import annotations
@@ -42,7 +42,7 @@ DEFAULT_STUDENT_BACKBONE = "convnextv2_tiny.fcmae_ft_in1k"
 
 
 def resolve_student_backbone_name(name: str) -> str:
-    """Chuyển tên rút gọn (vd 'convnextv2_tiny') sang tên model chuẩn của timm."""
+    """Resolve short alias (e.g., 'convnextv2_tiny') to canonical timm model name."""
     key = name.strip().lower()
     return STUDENT_BACKBONE_ALIASES.get(key, name.strip())
 
@@ -53,16 +53,16 @@ class StudentConfig:
     pretrained: bool = True
     drop_path_rate: float = 0.2
     num_classes: int = 3
-    feat_dim: int = 0  # 0 = tự động lấy từ backbone.num_features (vd 768 cho convnextv2_tiny)
+    feat_dim: int = 0  # 0 = auto-infer from backbone.num_features (e.g., 768 for convnextv2_tiny)
     proj_hidden_dim: int = 512
     latent_dim_mm: int = 256
     head_dropout: float = 0.2
 
 
 class ProjectionHead(nn.Module):
-    """Tầng chiếu thích ứng phi(.): ánh xạ f_img [B, d_S] -> f_proj [B, latent_dim_mm (256)].
+    """Adaptive projection layer phi(.): maps f_img [B, d_S] -> f_proj [B, latent_dim_mm (256)].
 
-    Kiến trúc:
+    Architecture:
         Linear(in_dim, hidden_dim) -> LayerNorm -> GELU -> Dropout -> Linear(hidden_dim, out_dim) -> LayerNorm
     """
 
@@ -88,7 +88,7 @@ class ProjectionHead(nn.Module):
 
 
 class VisionStudent(nn.Module):
-    """Mô hình Vision-Only Student nhận duy nhất ảnh RGB."""
+    """Vision-Only Student model taking RGB images exclusively."""
 
     def __init__(
         self,
@@ -133,14 +133,14 @@ class VisionStudent(nn.Module):
             self.vision_backbone.load_unimodal(vision_ckpt)
 
     def freeze_backbone(self) -> None:
-        """Đóng băng VisionBackbone (dùng ở pha Warm-up đầu nếu cần)."""
+        """Freeze VisionBackbone (used during initial warm-up phase if needed)."""
         for p in self.vision_backbone.parameters():
             p.requires_grad = False
         self.backbone_frozen = True
         self.train(self.training)
 
     def unfreeze_all(self) -> None:
-        """Mở khóa toàn mạng Student."""
+        """Unfreeze the entire Student network."""
         for p in self.vision_backbone.parameters():
             p.requires_grad = True
         self.backbone_frozen = False
@@ -159,7 +159,7 @@ class VisionStudent(nn.Module):
         backbone_wd: float = 1e-4,
         head_wd: float = 1e-2,
     ) -> List[Dict]:
-        """Differential learning rates: backbone LR nhỏ, ProjectionHead + Classifier LR lớn."""
+        """Differential learning rates: lower LR for backbone, higher LR for ProjectionHead + Classifier."""
         groups: List[Dict] = []
         bb_params = [p for p in self.vision_backbone.parameters() if p.requires_grad]
         if bb_params:
@@ -186,12 +186,12 @@ class VisionStudent(nn.Module):
         img: torch.Tensor,
         return_features: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
-        """Forward pass chỉ dùng ảnh RGB.
+        """RGB-only forward pass.
 
         Args:
-            img: Tensor ảnh RGB [B, 3, H, W].
-            return_features: Nếu True, trả về `(logits, f_img, f_proj)` phục vụ hàm loss chưng cất.
-                             Nếu False, trả về `logits` [B, num_classes] phục vụ suy luận/đánh giá.
+            img: RGB image tensor [B, 3, H, W].
+            return_features: If True, returns `(logits, f_img, f_proj)` for distillation loss.
+                             If False, returns `logits` [B, num_classes] for inference/evaluation.
         """
         f_img = self.vision_backbone(img)
         logits = self.classifier(f_img)
@@ -202,7 +202,7 @@ class VisionStudent(nn.Module):
 
 
 # ------------------------------------------------------------------------------
-# Lưu / nạp checkpoint Student
+# Save / load Student checkpoint
 # ------------------------------------------------------------------------------
 def student_checkpoint_dict(model: VisionStudent, **extra) -> Dict:
     state = {k[7:] if k.startswith("module.") else k: v for k, v in model.state_dict().items()}
@@ -221,7 +221,7 @@ def build_student_from_checkpoint(
     device: Union[str, torch.device] = "cpu",
     eval_mode: bool = True,
 ) -> VisionStudent:
-    """Dựng lại VisionStudent từ `best_student.pth` (không cần tải lại pretrained từ internet)."""
+    """Reconstruct VisionStudent from `best_student.pth` (no internet download needed for pretrained weights)."""
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     cfg_dict = dict(ckpt.get("student_config", {}))
     cfg_dict["pretrained"] = False

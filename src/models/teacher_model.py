@@ -1,28 +1,28 @@
-"""Mô hình Multi-Modal Teacher (Giai đoạn 1B của CMKD).
+"""Multi-Modal Teacher Model (Stage 1B of CMKD).
 
-Dự án: Phân loại độ chín sầu riêng bằng Chưng cất tri thức Đa phương thức (CMKD)
-Tham chiếu đặc tả: Mục 1.3.2.
+Project: Durian Ripeness Classification via Cross-Modal Knowledge Distillation (CMKD)
+Specification reference: Section 1.3.2.
 
-Kiến trúc:
+Architecture:
     img    [B,3,384,384] -> VisionBackbone (ConvNeXt V2-Base) -> f_img    [B,1024] ┐
     audio  [B,1,64,306]  -> AudioBackbone  (ResNet-18)        -> f_audio  [B,512]  ├-> CrossAttentionFusion -> f_mm [B,256] -> classifier -> logits [B,3]
     sensor [B,21]        -> SensorBackbone (MLP)              -> f_sensor [B,32]   ┘
 
 CrossAttentionMultimodalFusion:
-1. Chiếu từng nhánh đặc trưng về proj_dim (mặc định 256) (Linear + LayerNorm + GELU).
-2. Gán learnable Modality Embeddings định danh từng giác quan.
+1. Project each modality feature to proj_dim (default 256) (Linear + LayerNorm + GELU).
+2. Add learnable Modality Embeddings identifying each sensory modality.
 3. Transformer Cross-Attention (Multi-Head Self/Cross Attention):
-   - Các token phương thức (Vision, Audio, Sensor) tương tác và làm giàu thông tin cho nhau.
-   - Token Vision được làm giàu bởi âm thanh tiếng gõ và chỉ số cảm biến.
-   - Nhánh vắng mặt được che an toàn bằng `key_padding_mask` (chống nhiễu khi thiếu dữ liệu).
-4. Cổng thích ứng (Modality Gate): Học tầm quan trọng của từng nhánh sau khi tương tác chéo.
-5. Ghép nối và chiếu qua MLP -> f_mm [B, 256].
+   - Modality tokens (Vision, Audio, Sensor) interact and enrich one another.
+   - Vision token is enriched by knock acoustics and sensor measurements.
+   - Absent modalities are safely masked via `key_padding_mask` (prevents noise when data is missing).
+4. Adaptive Modality Gate: learns the importance of each branch after cross-modal interaction.
+5. Concatenate and project through MLP -> f_mm [B, 256].
 
-Vắng mặt phương thức: input toàn 0 (dataset thiếu dữ liệu, hoặc zero-masking ablation của
-eval_teacher.py) => đặc trưng nhánh đó bị che và gate bỏ qua nhánh đó.
-Modality dropout (chỉ khi train): ngẫu nhiên che 1 nhánh để Teacher không phụ thuộc một nhánh duy nhất.
+Missing modality: all-zero input (missing data in dataset, or zero-masking ablation in
+eval_teacher.py) => that branch's features are masked and ignored by the gate.
+Modality dropout (training only): randomly drops 1 branch so Teacher does not rely on a single modality.
 
-forward(img, audio, sensor) -> (logits, f_mm)   # f_mm dùng cho feature alignment ở Student
+forward(img, audio, sensor) -> (logits, f_mm)   # f_mm is used for feature alignment in Student
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ class TeacherConfig:
     fusion_hidden: int = 512
     fusion_dropout: float = 0.3
     modality_dropout: float = 0.15
-    fusion_type: str = "cross_attention"  # "cross_attention" hoặc "gated_concat"
+    fusion_type: str = "cross_attention"  # "cross_attention" or "gated_concat"
     num_attn_heads: int = 4
     num_attn_layers: int = 1
     vision_model_name: str = VISION_MODEL_NAME
@@ -64,12 +64,12 @@ class TeacherConfig:
 
 
 class CrossAttentionMultimodalFusion(nn.Module):
-    """Hợp nhất đa phương thức bằng Transformer Cross-Attention đa đầu.
+    """Multimodal fusion using Multi-Head Transformer Cross-Attention.
 
-    Cho phép Vision, Audio, Sensor tương tác chéo hai chiều:
-    - Vision được hỗ trợ từ tín hiệu rỗng/đặc của Audio và chỉ số lý hóa của Sensor.
-    - Xử lý hoàn hảo nhánh bị thiếu thông qua `key_padding_mask`.
-    - Sinh ra `gate_weights` [B, 3] tương thích với hệ thống đánh giá và Modality Ablation.
+    Enables bidirectional cross-interaction across Vision, Audio, and Sensor:
+    - Vision is supported by hollow/dense knock cues from Audio and physicochemical readings from Sensor.
+    - Handles missing modalities cleanly via `key_padding_mask`.
+    - Produces `gate_weights` [B, 3] compatible with the evaluation suite and Modality Ablation.
     """
 
     def __init__(
@@ -87,16 +87,16 @@ class CrossAttentionMultimodalFusion(nn.Module):
         self.proj_dim = proj_dim
         n = len(self.modalities)
 
-        # 1. Chiếu từng phương thức về không gian chung proj_dim
+        # 1. Project each modality into shared proj_dim space
         self.proj = nn.ModuleDict({
             m: nn.Sequential(nn.Linear(d, proj_dim), nn.LayerNorm(proj_dim), nn.GELU())
             for m, d in in_dims.items()
         })
 
-        # 2. Modality Embeddings để phân biệt đặc trưng đến từ Vision, Audio hay Sensor
+        # 2. Modality Embeddings to distinguish Vision, Audio, and Sensor tokens
         self.modality_embed = nn.Parameter(torch.randn(1, n, proj_dim) * 0.02)
 
-        # 3. Transformer Cross-Attention Layer(s) với Pre-LN
+        # 3. Transformer Cross-Attention Layer(s) with Pre-LN
         self.layers = nn.ModuleList([
             nn.TransformerEncoderLayer(
                 d_model=proj_dim,
@@ -111,14 +111,14 @@ class CrossAttentionMultimodalFusion(nn.Module):
         ])
         self.norm = nn.LayerNorm(proj_dim)
 
-        # 4. Cổng thích ứng (Modality Gate)
+        # 4. Adaptive Modality Gate
         self.gate = nn.Sequential(
             nn.Linear(n * proj_dim, n * 32),
             nn.GELU(),
             nn.Linear(n * 32, n),
         )
 
-        # 5. MLP tổng hợp cuối cùng -> f_mm
+        # 5. Final fusion MLP -> f_mm
         self.mlp = nn.Sequential(
             nn.Dropout(dropout),
             nn.Linear(n * proj_dim, hidden),
@@ -134,7 +134,7 @@ class CrossAttentionMultimodalFusion(nn.Module):
         """
         Args:
             feats: {modality: [B, d_m]}.
-            present: [B, n_modalities] (1 = có, 0 = vắng).
+            present: [B, n_modalities] (1 = present, 0 = absent).
         Returns:
             f_mm [B, out_dim], gate_weights [B, n_modalities].
         """
@@ -142,9 +142,9 @@ class CrossAttentionMultimodalFusion(nn.Module):
         z = torch.stack([self.proj[m](feats[m]) for m in self.modalities], dim=1)
         z = z + self.modality_embed
 
-        # Che các phương thức vắng mặt: True trong mask nghĩa là bị che
+        # Mask absent modalities: True in mask means ignored
         key_padding_mask = (present <= 0)
-        # Phòng trường hợp toàn bộ nhánh vắng mặt (mẫu rỗng bất thường)
+        # Guard against edge case where all modalities are absent (anomalous empty sample)
         all_missing = key_padding_mask.all(dim=-1, keepdim=True)
         safe_mask = torch.where(all_missing, torch.zeros_like(key_padding_mask), key_padding_mask)
 
@@ -153,21 +153,21 @@ class CrossAttentionMultimodalFusion(nn.Module):
             out = layer(out, src_key_padding_mask=safe_mask)
         out = self.norm(out)
 
-        # Triệt tiêu biểu diễn của nhánh vắng mặt
+        # Zero out representations of absent branches
         out = out * present.unsqueeze(-1)
 
-        # Tính toán cổng thích ứng (Gate)
+        # Compute adaptive gate weights
         gate_logits = self.gate(out.flatten(1)).masked_fill(present <= 0, -1e4)
         w = torch.softmax(gate_logits.float(), dim=-1).to(out.dtype) * present
 
-        # Nhân trọng số cổng và tổng hợp qua MLP
+        # Apply gate weights and aggregate via MLP
         fused = (out * w.unsqueeze(-1) * out.size(1)).flatten(1)
         f_mm = self.mlp(fused)
         return f_mm, w
 
 
 class GatedConcatMultimodalFusion(nn.Module):
-    """Cơ chế Gated Concat cũ (để giữ tính tương thích ngược)."""
+    """Legacy Gated Concat fusion mechanism (retained for backward compatibility)."""
 
     def __init__(self, in_dims: Dict[str, int], proj_dim: int = 256, hidden: int = 512,
                  out_dim: int = 256, dropout: float = 0.3):
@@ -195,7 +195,7 @@ class GatedConcatMultimodalFusion(nn.Module):
         return self.mlp(fused), w
 
 
-# Mặc định sử dụng CrossAttentionMultimodalFusion
+# Use CrossAttentionMultimodalFusion by default
 MultimodalFusion = CrossAttentionMultimodalFusion
 
 
@@ -216,7 +216,7 @@ class MultiModalTeacher(nn.Module):
             cfg_dict.update({k: v for k, v in kwargs.items() if k in TeacherConfig.__dataclass_fields__})
             config = TeacherConfig(**cfg_dict)
 
-        # Nếu có sensor_ckpt, tự động đồng bộ cấu hình chiều của SensorBackbone
+        # If sensor_ckpt is provided, automatically sync SensorBackbone dimension config
         if sensor_ckpt and os.path.isfile(sensor_ckpt):
             s_meta = torch.load(sensor_ckpt, map_location="cpu", weights_only=False)
             if isinstance(s_meta, dict):
@@ -236,7 +236,7 @@ class MultiModalTeacher(nn.Module):
             num_classes=c.num_classes,
             dropout=c.sensor_dropout,
         )
-        # Head phân loại riêng của SensorMLP không dùng trong Teacher -> đóng băng vĩnh viễn
+        # Standalone SensorMLP classifier head is unused in Teacher -> permanently frozen
         for p in self.sensor_backbone.classifier.parameters():
             p.requires_grad = False
 
@@ -271,7 +271,7 @@ class MultiModalTeacher(nn.Module):
             )
 
     # ------------------------------------------------------------------
-    # Nạp trọng số unimodal (Giai đoạn 1A)
+    # Load unimodal weights (Stage 1A)
     # ------------------------------------------------------------------
     def load_unimodal_backbones(
         self,
@@ -298,13 +298,13 @@ class MultiModalTeacher(nn.Module):
         return loaded
 
     # ------------------------------------------------------------------
-    # Chiến lược huấn luyện 2 pha
+    # Two-phase training strategy
     # ------------------------------------------------------------------
     def backbone_modules(self) -> Dict[str, nn.Module]:
         return {"vision": self.vision_backbone, "audio": self.audio_backbone, "sensor": self.sensor_backbone.encoder}
 
     def freeze_backbones(self) -> None:
-        """Pha 1 (Warm-up): đóng băng 3 backbone, giữ BatchNorm/DropPath ở chế độ eval."""
+        """Phase 1 (Warm-up): freeze all 3 backbones and keep BatchNorm/DropPath in eval mode."""
         for m in self.backbone_modules().values():
             for p in m.parameters():
                 p.requires_grad = False
@@ -312,7 +312,7 @@ class MultiModalTeacher(nn.Module):
         self.train(self.training)
 
     def unfreeze_all(self) -> None:
-        """Pha 2 (Joint fine-tuning): mở khóa toàn bộ (trừ head riêng của SensorMLP)."""
+        """Phase 2 (Joint fine-tuning): unfreeze all modules (except the standalone SensorMLP classifier head)."""
         for m in self.backbone_modules().values():
             for p in m.parameters():
                 p.requires_grad = True
@@ -333,7 +333,7 @@ class MultiModalTeacher(nn.Module):
         backbone_wd: float = 1e-4,
         head_wd: float = 1e-2,
     ) -> List[Dict]:
-        """Differential learning rates: backbone LR nhỏ, Fusion + Head LR lớn."""
+        """Differential learning rates: lower LR for backbones, higher LR for Fusion + Head."""
         groups = []
         for name, m in self.backbone_modules().items():
             params = [p for p in m.parameters() if p.requires_grad]
@@ -356,7 +356,7 @@ class MultiModalTeacher(nn.Module):
             return present
         drop = (torch.rand_like(present) < p).float()
         kept = present * (1 - drop)
-        # Luôn giữ ít nhất 1 nhánh: mẫu nào bị che hết thì khôi phục như cũ
+        # Always retain at least 1 branch: restore original if all modalities were dropped
         empty = kept.sum(dim=1, keepdim=True) == 0
         return torch.where(empty, present, kept)
 
@@ -384,7 +384,7 @@ class MultiModalTeacher(nn.Module):
 
 
 # ------------------------------------------------------------------------------
-# Lưu / nạp checkpoint Teacher
+# Save / load Teacher checkpoint
 # ------------------------------------------------------------------------------
 def teacher_checkpoint_dict(model: MultiModalTeacher, **extra) -> Dict:
     state = {k[7:] if k.startswith("module.") else k: v for k, v in model.state_dict().items()}
@@ -402,7 +402,7 @@ def build_teacher_from_checkpoint(
     device: Union[str, torch.device] = "cpu",
     eval_mode: bool = True,
 ) -> MultiModalTeacher:
-    """Dựng lại Teacher từ `best_teacher.pth` (dùng cho eval_teacher.py và chưng cất Student)."""
+    """Reconstruct Teacher from `best_teacher.pth` (for eval_teacher.py and Student distillation)."""
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     model = MultiModalTeacher(TeacherConfig(**ckpt.get("teacher_config", {})))
     model.load_state_dict(ckpt["model_state_dict"], strict=True)

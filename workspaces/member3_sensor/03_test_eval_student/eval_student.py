@@ -1,29 +1,29 @@
-"""Module kiểm thử, đánh giá mô hình (Vision-Only Student / Baseline / Teacher / Sensor) và đo hiệu năng triển khai.
+"""Model testing, evaluation (Vision-Only Student / Baseline / Teacher / Sensor) and deployment profiling.
 
-Phụ trách: Member 3 (Gia Bảo)
-Dự án: Nhận diện độ chín sầu riêng bằng Chưng cất tri thức Đa phương thức (CMKD)
+Responsible: Member 3 (Gia Bao)
+Project: Durian Ripeness Classification via Cross-Modal Knowledge Distillation (CMKD)
 
-Script nhận vào MÔ HÌNH + DATALOADER và tự động xuất: bảng metrics, ma trận nhầm lẫn, log, CSV dự đoán.
+Accepts MODEL + DATALOADER and automatically outputs: metrics tables, confusion matrices, logs, prediction CSVs.
 
-Các chức năng chính
--------------------
-1. StudentEvaluator.evaluate_and_report(model, loader)     -> metrics + confusion matrix + log (dùng cho mọi mô hình)
-2. StudentEvaluator.evaluate_vision_model(...)              -> bảng dự đoán từng mẫu / từng góc ảnh
-3. StudentEvaluator.evaluate_fruit_level_aggregation(...)   -> gộp 6 góc về cấp độ quả + Angle Consistency
+Main features
+-------------
+1. StudentEvaluator.evaluate_and_report(model, loader)     -> metrics + confusion matrix + log (any model)
+2. StudentEvaluator.evaluate_vision_model(...)              -> per-sample / per-view prediction table
+3. StudentEvaluator.evaluate_fruit_level_aggregation(...)   -> fruit-level aggregation across 6 views + Angle Consistency
 4. StudentEvaluator.compute_metrics(...)                    -> Acc, Macro-F1, per-class P/R/F1/FPR, ROC-AUC, PR-AUC, ECE,
                                                                MCC, Kappa, Top-2, LogLoss, Brier
-5. StudentEvaluator.compute_distillation_alignment(...)     -> KL-Divergence và Cosine so với Teacher
+5. StudentEvaluator.compute_distillation_alignment(...)     -> KL-Divergence and Cosine similarity vs Teacher
 6. StudentEvaluator.compare_tri_benchmark(...)              -> Baseline vs Student vs Teacher, Distillation Gain, Retention
-7. StudentDeploymentBenchmark                               -> Latency (mean/p95/p99), FPS, tham số, FLOPs, dung lượng, VRAM
-8. StudentDistillationAblationEvaluator                     -> lưới ablation (T, alpha/beta/gamma, ...)
+7. StudentDeploymentBenchmark                               -> Latency (mean/p95/p99), FPS, parameters, FLOPs, size, VRAM
+8. StudentDistillationAblationEvaluator                     -> ablation grid (T, alpha/beta/gamma, ...)
 9. StudentBaselineCAMComparer                               -> Grad-CAM Baseline vs Student (CNN)
 
-QUY ƯỚC DATALOADER (mặc định, có thể ghi đè bằng unpack_fn / forward_fn):
-    batch = (images, labels, fruit_ids[, camera_angles])      # mô hình ảnh
-    batch = (x_sensor, labels, fruit_ids)                      # mô hình sensor (SensorDataset)
-    Teacher đa phương thức (img, audio, sensor, label, fruit_id): truyền unpack_fn và forward_fn riêng (xem docstring).
+DATALOADER CONVENTIONS (default, overridable via unpack_fn / forward_fn):
+    batch = (images, labels, fruit_ids[, camera_angles])      # vision models
+    batch = (x_sensor, labels, fruit_ids)                      # sensor models (SensorDataset)
+    Multimodal Teacher (img, audio, sensor, label, fruit_id): pass custom unpack_fn and forward_fn (see docstring).
 
-KIỂM TRA NHANH (không cần dữ liệu/checkpoint thật):
+QUICK SELF-TEST (no real data or checkpoints required):
     python eval_student.py --selftest
 """
 
@@ -69,9 +69,9 @@ logging.basicConfig(
 logger = logging.getLogger("eval_student")
 
 # ------------------------------------------------------------------------------
-# 1. HẰNG SỐ CHUẨN TOÀN DỰ ÁN
+# 1. PROJECT-WIDE CONSTANTS
 # ------------------------------------------------------------------------------
-CLASS_ORDER = ["Unripe", "Ripe", "Overripe"]  # 0: Chưa chín, 1: Chín, 2: Quá chín
+CLASS_ORDER = ["Unripe", "Ripe", "Overripe"]  # 0: Unripe, 1: Ripe, 2: Overripe
 LABEL_TO_IDX = {c: i for i, c in enumerate(CLASS_ORDER)}
 IDX_TO_LABEL = {i: c for i, c in enumerate(CLASS_ORDER)}
 NUM_CLASSES = len(CLASS_ORDER)
@@ -79,10 +79,10 @@ PROB_COLS = [f"prob_{c.lower()}" for c in CLASS_ORDER]
 
 
 # ------------------------------------------------------------------------------
-# 2. TIỆN ÍCH CHUNG
+# 2. COMMON UTILITIES
 # ------------------------------------------------------------------------------
 def df_to_markdown(df: pd.DataFrame, floatfmt: str = "{:.4f}") -> str:
-    """Bảng Markdown không cần thư viện tabulate."""
+    """Render Markdown table without requiring tabulate."""
     cols = list(df.columns)
     lines = ["| " + " | ".join(map(str, cols)) + " |", "|" + "|".join(["---"] * len(cols)) + "|"]
     for _, r in df.iterrows():
@@ -97,7 +97,7 @@ def df_to_markdown(df: pd.DataFrame, floatfmt: str = "{:.4f}") -> str:
 
 
 def _default_unpack(batch) -> Tuple[Any, Any, Any, Any]:
-    """Tách batch thành (đầu_vào, nhãn, fruit_id, góc_chụp). Hỗ trợ tuple/list và dict."""
+    """Unpack batch into (input, label, fruit_id, camera_angle). Supports tuple/list and dict."""
     if isinstance(batch, dict):
         x = next((batch[k] for k in ("image", "img", "x", "input") if k in batch), None)
         y = next((batch[k] for k in ("label", "y", "target") if k in batch), None)
@@ -136,11 +136,11 @@ def expected_calibration_error(y_true: np.ndarray, probs: np.ndarray, n_bins: in
 
 
 # ------------------------------------------------------------------------------
-# 3. CẤU HÌNH
+# 3. CONFIGURATION
 # ------------------------------------------------------------------------------
 @dataclass
 class StudentEvaluatorConfig:
-    """Cấu hình đánh giá. Các đường dẫn là mặc định, có thể ghi đè bằng tham số dòng lệnh."""
+    """Evaluation configuration. Default paths can be overridden via CLI arguments."""
     student_checkpoint_path: str = "checkpoints/student_distilled_best.pth"
     baseline_checkpoint_path: str = "checkpoints/unimodal/best_vision_unimodal.pth"
     teacher_checkpoint_path: str = "checkpoints/teacher_best.pth"
@@ -158,15 +158,15 @@ class StudentEvaluatorConfig:
     input_image_size: Tuple[int, int] = (224, 224)
 
     camera_angles: List[str] = field(default_factory=lambda: ["TOP", "BOT", "SA", "SB", "SC", "SD"])
-    fruit_aggregation_strategy: str = "mean_prob"  # 'mean_prob' hoặc 'majority_vote'
+    fruit_aggregation_strategy: str = "mean_prob"  # 'mean_prob' or 'majority_vote'
     distill_temperature: float = 1.0
 
 
 # ------------------------------------------------------------------------------
-# 4. BỘ ĐÁNH GIÁ CHÍNH
+# 4. MAIN EVALUATOR
 # ------------------------------------------------------------------------------
 class StudentEvaluator:
-    """Bộ đánh giá toàn diện: nạp mô hình, suy luận, metrics, so sánh 3 mốc, độ lệch so với Teacher."""
+    """Comprehensive evaluator: model loading, inference, metrics, 3-way comparison, Teacher alignment."""
 
     def __init__(
         self,
@@ -179,9 +179,9 @@ class StudentEvaluator:
     ) -> None:
         """
         Args:
-            model_builders: {'student': fn, 'baseline': fn, 'teacher': fn}; mỗi fn nhận dict checkpoint
-                và trả về nn.Module chưa nạp trọng số. Cần khi checkpoint chỉ chứa state_dict và
-                không có khóa 'arch' (tên kiến trúc timm).
+            model_builders: {'student': fn, 'baseline': fn, 'teacher': fn}; each fn takes the checkpoint dict
+                and returns an uninitialized nn.Module. Needed when checkpoint only holds state_dict and
+                lacks the 'arch' key (timm architecture name).
         """
         self.config = config
         self.device = torch.device(config.device)
@@ -200,19 +200,19 @@ class StudentEvaluator:
             fh = logging.FileHandler(log_path, encoding="utf-8")
             fh.setFormatter(logging.Formatter("[%(asctime)s] [%(levelname)s]: %(message)s"))
             logger.addHandler(fh)
-        logger.info(f"Khởi tạo StudentEvaluator trên thiết bị: {self.device} | kết quả: {self.output_dir}")
+        logger.info(f"Initialized StudentEvaluator on device: {self.device} | output: {self.output_dir}")
 
-    # ---------------------------------------------------------------- nạp mô hình
+    # ---------------------------------------------------------------- model loading
     def load_model_from_checkpoint(self, checkpoint_path: str, architecture_type: str = "student") -> nn.Module:
-        """Nạp mô hình từ .pth.
+        """Load model from .pth checkpoint.
 
-        Thứ tự xử lý:
-          1. Checkpoint chứa nguyên đối tượng nn.Module (khóa 'model') -> dùng luôn.
-          2. Dựng kiến trúc bằng model_builders[architecture_type](ckpt), hoặc timm.create_model(ckpt['arch']).
-          3. Lấy state_dict từ 'model_state_dict' / 'state_dict' / 'full_state_dict' / 'backbone_state_dict'
-             hoặc chính checkpoint; bỏ prefix 'module.'; bỏ các khóa Projection Head (proj/phi) khi kiểm thử.
+        Resolution order:
+          1. Checkpoint stores a full nn.Module ('model' key) -> return directly.
+          2. Build architecture via model_builders[architecture_type](ckpt), or timm.create_model(ckpt['arch']).
+          3. Extract state_dict from 'model_state_dict' / 'state_dict' / 'full_state_dict' / 'backbone_state_dict'
+             or root dict; strip 'module.' prefix; skip Projection Head keys (proj/phi) during testing.
         """
-        logger.info(f"Đang nạp mô hình [{architecture_type}] từ: {checkpoint_path}")
+        logger.info(f"Loading model [{architecture_type}] from: {checkpoint_path}")
         ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
 
         if isinstance(ckpt, nn.Module):
@@ -227,8 +227,8 @@ class StudentEvaluator:
             model = timm.create_model(ckpt["arch"], pretrained=False, num_classes=NUM_CLASSES)
         else:
             raise ValueError(
-                f"Không biết dựng kiến trúc cho [{architecture_type}]. Hãy truyền "
-                f"model_builders={{'{architecture_type}': lambda ckpt: MyModel(...)}} hoặc lưu khóa 'arch' trong checkpoint."
+                f"Cannot infer architecture for [{architecture_type}]. Pass "
+                f"model_builders={{'{architecture_type}': lambda ckpt: MyModel(...)}} or store 'arch' key in checkpoint."
             )
 
         state = ckpt
@@ -242,12 +242,12 @@ class StudentEvaluator:
         state = {k: v for k, v in state.items() if not k.startswith(skip)}
         missing, unexpected = model.load_state_dict(state, strict=False)
         if missing:
-            logger.warning(f"[{architecture_type}] thiếu {len(missing)} khóa, ví dụ: {missing[:3]}")
+            logger.warning(f"[{architecture_type}] missing {len(missing)} keys, e.g.: {missing[:3]}")
         if unexpected:
-            logger.warning(f"[{architecture_type}] thừa {len(unexpected)} khóa, ví dụ: {unexpected[:3]}")
+            logger.warning(f"[{architecture_type}] unexpected {len(unexpected)} keys, e.g.: {unexpected[:3]}")
         return model.to(self.device).eval()
 
-    # ---------------------------------------------------------------- suy luận
+    # ---------------------------------------------------------------- inference
     @torch.no_grad()
     def extract_outputs(
         self,
@@ -256,11 +256,11 @@ class StudentEvaluator:
         forward_fn: Callable = _default_forward,
         unpack_fn: Callable = _default_unpack,
     ) -> Dict[str, Any]:
-        """Chạy mô hình trên loader, trả về logits, (tùy chọn) đặc trưng, nhãn, fruit_id, góc chụp.
+        """Run model on loader and return logits, (optional) features, labels, fruit_ids, camera angles.
 
-        forward_fn(model, x, device) có thể trả về logits hoặc (logits, feats). Với SensorBackbone:
+        forward_fn(model, x, device) may return logits or (logits, feats). For SensorBackbone:
             forward_fn=lambda m, x, d: m(x.to(d), return_latent=True)
-        Với Teacher đa phương thức: unpack_fn=lambda b: (b, b[3], b[4], None) và
+        For multimodal Teacher: unpack_fn=lambda b: (b, b[3], b[4], None) and
             forward_fn=lambda m, b, d: m(b[0].to(d), b[1].to(d), b[2].to(d)).
         """
         model.eval().to(self.device)
@@ -294,12 +294,12 @@ class StudentEvaluator:
         forward_fn: Callable = _default_forward,
         unpack_fn: Callable = _default_unpack,
     ) -> pd.DataFrame:
-        """Suy luận trên từng mẫu/góc ảnh. Trả về DataFrame:
+        """Run per-sample / per-view inference. Returns DataFrame with columns:
         fruit_id, camera_angle, true_label, pred_label, prob_unripe, prob_ripe, prob_overripe, is_correct."""
         loader = test_loader or self.test_loader
         if loader is None:
-            raise ValueError("Cần truyền test_loader hoặc gán StudentEvaluator.test_loader.")
-        logger.info(f"Đánh giá mô hình [{model_name}] ở cấp độ góc nhìn (View-level)...")
+            raise ValueError("Pass test_loader or set StudentEvaluator.test_loader.")
+        logger.info(f"Evaluating model [{model_name}] at View-level...")
         out = self.extract_outputs(model, loader, forward_fn, unpack_fn)
         self.last_outputs[model_name] = out
         probs = F.softmax(out["logits"], dim=-1).numpy()
@@ -316,20 +316,20 @@ class StudentEvaluator:
         return df
 
     def evaluate_fruit_level_aggregation(self, sample_df: pd.DataFrame, strategy: Optional[str] = None) -> pd.DataFrame:
-        """Gộp các góc chụp về cấp độ quả. Thêm Angle Consistency = tỷ lệ góc cùng dự đoán với nhãn quả."""
+        """Aggregate views to fruit level. Computes Angle Consistency = fraction of views matching fruit prediction."""
         strat = strategy or self.config.fruit_aggregation_strategy
-        logger.info(f"Tổng hợp cấp độ quả theo chiến lược: {strat}")
+        logger.info(f"Aggregating fruit-level predictions using strategy: {strat}")
         rows = []
         for fid, g in sample_df.groupby("fruit_id", sort=True):
             mean_p = g[PROB_COLS].mean().values
             if strat == "majority_vote":
                 counts = np.bincount(g["pred_label"].values, minlength=NUM_CLASSES)
                 top = np.flatnonzero(counts == counts.max())
-                pred = int(top[np.argmax(mean_p[top])]) if len(top) > 1 else int(top[0])  # hòa phiếu -> theo xác suất
+                pred = int(top[np.argmax(mean_p[top])]) if len(top) > 1 else int(top[0])  # tie-break by probability
             elif strat == "mean_prob":
                 pred = int(mean_p.argmax())
             else:
-                raise ValueError("strategy phải là 'mean_prob' hoặc 'majority_vote'")
+                raise ValueError("strategy must be 'mean_prob' or 'majority_vote'")
             true = int(g["true_label"].iloc[0])
             row = {"fruit_id": fid, "n_views": len(g), "true_label": true, "pred_label": pred,
                    "angle_consistency": float((g["pred_label"] == pred).mean()),
@@ -346,7 +346,7 @@ class StudentEvaluator:
         y_probs: Optional[np.ndarray] = None,
         prefix: str = "",
     ) -> Dict[str, float]:
-        """Metrics phân loại toàn diện (xem docstring đầu file). Metric cần xác suất chỉ tính khi có y_probs."""
+        """Comprehensive classification metrics (see module docstring). Probability-based metrics require y_probs."""
         y_true, y_pred = np.asarray(y_true).astype(int), np.asarray(y_pred).astype(int)
         labels = list(range(NUM_CLASSES))
         cm = confusion_matrix(y_true, y_pred, labels=labels)
@@ -366,7 +366,7 @@ class StudentEvaluator:
             m[f"fpr_{c}"] = fp / (fp + tn) if (fp + tn) > 0 else float("nan")
         if y_probs is not None:
             p = np.asarray(y_probs, dtype=np.float64)
-            p = p / np.clip(p.sum(axis=1, keepdims=True), 1e-12, None)  # chuẩn hóa lại sai số float32
+            p = p / np.clip(p.sum(axis=1, keepdims=True), 1e-12, None)  # renormalize float32 rounding error
             onehot = np.eye(NUM_CLASSES)[y_true]
             m["top2_accuracy"] = float(np.mean([t in np.argsort(-r)[:2] for t, r in zip(y_true, p)]))
             m["ece"] = expected_calibration_error(y_true, p)
@@ -378,7 +378,7 @@ class StudentEvaluator:
             try:
                 m["roc_auc_macro"] = roc_auc_score(y_true, p, multi_class="ovr", average="macro", labels=labels)
                 m["pr_auc_macro"] = float(np.mean([average_precision_score(onehot[:, i], p[:, i]) for i in labels]))
-            except ValueError:  # thiếu lớp trong y_true
+            except ValueError:  # missing class in y_true
                 m["roc_auc_macro"] = m["pr_auc_macro"] = float("nan")
         return {f"{prefix}{k}": float(v) for k, v in m.items()}
 
@@ -391,19 +391,19 @@ class StudentEvaluator:
         temperature: Optional[float] = None,
         projection: Optional[nn.Module] = None,
     ) -> Dict[str, float]:
-        """Độ lệch của Student so với Teacher trên CÙNG thứ tự mẫu (loader không shuffle).
+        """Student alignment relative to Teacher on the EXACT SAME sample order (unshuffled loader).
 
-        - kl_teacher_to_student: KL(softmax(z_t/T) || softmax(z_s/T)), dạng KD chuẩn (batchmean).
-        - kl_student_to_teacher: KL(softmax(z_s/T) || softmax(z_t/T)), đúng công thức L_KD trong đặc tả đề tài.
-        - prediction_agreement: tỷ lệ mẫu Student và Teacher dự đoán trùng nhau.
-        - cosine_similarity_mean/std: giữa phi(f_img^(S)) và f_mm. Nếu số chiều khác nhau phải truyền projection.
+        - kl_teacher_to_student: KL(softmax(z_t/T) || softmax(z_s/T)), standard KD form (batchmean).
+        - kl_student_to_teacher: KL(softmax(z_s/T) || softmax(z_t/T)), matching L_KD in specification.
+        - prediction_agreement: fraction of samples where Student and Teacher predict the same class.
+        - cosine_similarity_mean/std: between phi(f_img^(S)) and f_mm. Pass projection if dims differ.
         """
         T = float(temperature or self.config.distill_temperature)
         s = torch.as_tensor(student_logits).float()
         t = torch.as_tensor(teacher_logits).float()
         if s.shape != t.shape:
-            raise ValueError(f"Logits Student {tuple(s.shape)} và Teacher {tuple(t.shape)} không cùng kích thước "
-                             "(kiểm tra thứ tự/ số mẫu của hai loader).")
+            raise ValueError(f"Student logits {tuple(s.shape)} and Teacher logits {tuple(t.shape)} have different shapes "
+                             "(check sample ordering / counts across loaders).")
         eps = 1e-12
         ps, pt = F.softmax(s / T, dim=-1), F.softmax(t / T, dim=-1)
         kl_ts = (pt * (torch.log(pt + eps) - torch.log(ps + eps))).sum(-1).mean().item()
@@ -421,14 +421,14 @@ class StudentEvaluator:
                 with torch.no_grad():
                     sf = projection.cpu().eval()(sf)
             if sf.shape[-1] != tf.shape[-1]:
-                raise ValueError(f"Số chiều đặc trưng khác nhau (Student {sf.shape[-1]} vs Teacher {tf.shape[-1]}): "
-                                 "hãy truyền projection (Projection Head phi) để đưa về cùng chiều.")
+                raise ValueError(f"Feature dimension mismatch (Student {sf.shape[-1]} vs Teacher {tf.shape[-1]}): "
+                                 "pass projection (Projection Head phi) to match dimensions.")
             cos = F.cosine_similarity(sf, tf, dim=-1)
             res["cosine_similarity_mean"] = float(cos.mean())
             res["cosine_similarity_std"] = float(cos.std(unbiased=False))
         return res
 
-    # ---------------------------------------------------------------- so sánh 3 mốc
+    # ---------------------------------------------------------------- tri-benchmark comparison
     def compare_tri_benchmark(
         self,
         baseline_metrics: Dict[str, float],
@@ -436,8 +436,8 @@ class StudentEvaluator:
         teacher_metrics: Optional[Dict[str, float]] = None,
         save_name: str = "tri_benchmark",
     ) -> pd.DataFrame:
-        """Bảng Baseline | Student | Gain (Δ) | Teacher | Retention (%). Gain = Student - Baseline
-        (với ECE/LogLoss, giá trị càng THẤP càng tốt nên Δ âm là cải thiện)."""
+        """Table: Baseline | Student | Gain (Δ) | Teacher | Retention (%). Gain = Student - Baseline
+        (for ECE/LogLoss, lower is better so negative Δ indicates improvement)."""
         keys = ["accuracy", "balanced_accuracy", "macro_f1", "f1_Unripe", "f1_Ripe", "f1_Overripe", "ece", "log_loss"]
         higher_better = {"ece": False, "log_loss": False}
         rows = []
@@ -456,10 +456,10 @@ class StudentEvaluator:
         df = pd.DataFrame(rows)
         df.to_csv(self.output_dir / f"{save_name}.csv", index=False)
         (self.output_dir / f"{save_name}.md").write_text(df_to_markdown(df), encoding="utf-8")
-        logger.info(f"Đã lưu bảng so sánh 3 mốc: {save_name}.csv / .md")
+        logger.info(f"Saved tri-benchmark comparison table: {save_name}.csv / .md")
         return df
 
-    # ---------------------------------------------------------------- vẽ
+    # ---------------------------------------------------------------- plotting
     def plot_confusion_matrix(self, y_true, y_pred, title: str, save_name: str) -> str:
         labels = list(range(NUM_CLASSES))
         cm = confusion_matrix(y_true, y_pred, labels=labels)
@@ -480,8 +480,8 @@ class StudentEvaluator:
         ax.set_yticks(labels)
         ax.set_xticklabels(CLASS_ORDER)
         ax.set_yticklabels(CLASS_ORDER)
-        ax.set_xlabel("Dự đoán")
-        ax.set_ylabel("Thực tế")
+        ax.set_xlabel("Predicted")
+        ax.set_ylabel("Actual")
         ax.set_title(title, fontsize=10)
         for i in labels:
             for j in labels:
@@ -496,7 +496,7 @@ class StudentEvaluator:
         student_y_pred: Sequence[int],
         save_name: str = "comparative_confusion_matrix.png",
     ) -> str:
-        """Hai ma trận nhầm lẫn song song (chuẩn hóa theo hàng, kèm số lượng)."""
+        """Side-by-side confusion matrices (row-normalized, with counts)."""
         labels = list(range(NUM_CLASSES))
         fig, axes = plt.subplots(1, 2, figsize=(11, 4.6))
         for ax, (yt, yp, name) in zip(axes, [(baseline_y_true, baseline_y_pred, "Vision Baseline"),
@@ -509,7 +509,7 @@ class StudentEvaluator:
         plt.close(fig)
         return str(path)
 
-    # ---------------------------------------------------------------- đánh giá một mô hình (model + loader)
+    # ---------------------------------------------------------------- single model evaluation (model + loader)
     def evaluate_and_report(
         self,
         model: nn.Module,
@@ -519,7 +519,7 @@ class StudentEvaluator:
         unpack_fn: Callable = _default_unpack,
         aggregate_by_fruit: bool = False,
     ) -> Dict[str, float]:
-        """Điểm vào chính: model + dataloader -> bảng metrics (CSV/MD), confusion matrix (PNG), dự đoán (CSV), log."""
+        """Main entrypoint: model + dataloader -> metrics (CSV/MD), confusion matrix (PNG), predictions (CSV), log."""
         df = self.evaluate_vision_model(model, loader, model_name, forward_fn, unpack_fn)
         if aggregate_by_fruit:
             df = self.evaluate_fruit_level_aggregation(df)
@@ -535,7 +535,7 @@ class StudentEvaluator:
                     f"ECE={met.get('ece', float('nan')):.4f}")
         return met
 
-    # ---------------------------------------------------------------- chạy toàn bộ so sánh 3 mốc
+    # ---------------------------------------------------------------- full 3-way evaluation
     def run_full_evaluation(
         self,
         test_loader: Optional[DataLoader] = None,
@@ -545,7 +545,7 @@ class StudentEvaluator:
         student_forward_fn: Callable = _default_forward,
         student_projection: Optional[nn.Module] = None,
     ) -> Dict[str, Any]:
-        """Baseline vs Student (vs Teacher): metrics cấp góc ảnh và cấp quả, Distillation Gain, KL/Cosine, ma trận nhầm lẫn."""
+        """Baseline vs Student (vs Teacher): view-level and fruit-level metrics, Distillation Gain, KL/Cosine, confusion matrices."""
         loader = test_loader or self.test_loader
         models = {"baseline": self.baseline_model, "student": self.student_model}
         for name, path in (("baseline", self.config.baseline_checkpoint_path), ("student", self.config.student_checkpoint_path)):
@@ -558,7 +558,7 @@ class StudentEvaluator:
         view_df, fruit_df, met_view, met_fruit = {}, {}, {}, {}
         for name, mdl in models.items():
             if mdl is None:
-                logger.warning(f"Bỏ qua [{name}]: chưa có mô hình/checkpoint.")
+                logger.warning(f"Skipping [{name}]: no model/checkpoint available.")
                 continue
             view_df[name] = self.evaluate_vision_model(mdl, loader, name, student_forward_fn)
             fruit_df[name] = self.evaluate_fruit_level_aggregation(view_df[name])
@@ -593,10 +593,10 @@ class StudentEvaluator:
 
 
 # ------------------------------------------------------------------------------
-# 5. ĐO LƯỜNG HIỆU NĂNG TRIỂN KHAI
+# 5. DEPLOYMENT PERFORMANCE PROFILING
 # ------------------------------------------------------------------------------
 class StudentDeploymentBenchmark:
-    """Latency, FPS, tham số, FLOPs, dung lượng, VRAM đỉnh."""
+    """Latency, FPS, parameter count, FLOPs, disk size, peak VRAM."""
 
     def __init__(self, output_dir: str) -> None:
         self.output_dir = Path(output_dir)
@@ -611,9 +611,9 @@ class StudentDeploymentBenchmark:
         warmup_runs: int = 50,
         test_runs: int = 200,
     ) -> Dict[str, float]:
-        """Latency (ms) mean/std/median/min/max/p95/p99; FPS = batch*1000/mean; VRAM đỉnh (MB) nếu dùng CUDA.
-        input_size có thể là (B,C,H,W) hoặc (B, số_đặc_trưng) cho mô hình sensor."""
-        logger.info(f"Đo Latency & Throughput trên [{device}] với input {input_size}...")
+        """Latency (ms) mean/std/median/min/max/p95/p99; FPS = batch*1000/mean; peak VRAM (MB) on CUDA.
+        input_size can be (B,C,H,W) or (B, num_features) for sensor models."""
+        logger.info(f"Measuring Latency & Throughput on [{device}] with input {input_size}...")
         dev = torch.device(device)
         mdl = copy.deepcopy(model).to(dev).eval()
         x = torch.randn(*input_size, device=dev)
@@ -650,8 +650,8 @@ class StudentDeploymentBenchmark:
         return res
 
     def profile_model_complexity(self, model: nn.Module, input_size: Tuple[int, ...] = (1, 3, 224, 224)) -> Dict[str, Any]:
-        """Tham số (tổng/huấn luyện được), dung lượng (MB, đo bằng state_dict tuần tự hóa), FLOPs/MACs."""
-        logger.info("Tính độ phức tạp mô hình (Parameters, FLOPs, Size)...")
+        """Parameters (total/trainable), serialized state_dict size (MB), FLOPs/MACs."""
+        logger.info("Profiling model complexity (Parameters, FLOPs, Size)...")
         total = sum(p.numel() for p in model.parameters())
         trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
         buf = io.BytesIO()
@@ -668,13 +668,13 @@ class StudentDeploymentBenchmark:
             flops = fc.get_total_flops()
             res.update(flops=int(flops), gflops=flops / 1e9, macs=int(flops // 2), gmacs=flops / 2e9)
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"Không tính được FLOPs: {e}")
+            logger.warning(f"Could not compute FLOPs: {e}")
             res.update(flops=np.nan, gflops=np.nan, macs=np.nan, gmacs=np.nan)
         return res
 
     def run_and_save(self, models: Dict[str, nn.Module], input_size: Tuple[int, ...] = (1, 3, 224, 224),
                      devices: Sequence[str] = ("cpu",), save_name: str = "deployment_benchmark") -> pd.DataFrame:
-        """Đo nhiều mô hình (ví dụ Student, Baseline, Teacher) và lưu bảng so sánh."""
+        """Profile multiple models (e.g., Student, Baseline, Teacher) and save comparison table."""
         rows = []
         for name, mdl in models.items():
             cx = self.profile_model_complexity(mdl, input_size)
@@ -692,7 +692,7 @@ class StudentDeploymentBenchmark:
 # 6. ABLATION
 # ------------------------------------------------------------------------------
 class StudentDistillationAblationEvaluator:
-    """Đánh giá lưới ablation: T, alpha/beta, gamma, Cosine vs MSE..."""
+    """Evaluate distillation ablation grid: T, alpha/beta, gamma, Cosine vs MSE..."""
 
     def __init__(self, output_dir: str) -> None:
         self.output_dir = Path(output_dir)
@@ -704,7 +704,7 @@ class StudentDistillationAblationEvaluator:
         test_loader: DataLoader,
         evaluator: StudentEvaluator,
     ) -> pd.DataFrame:
-        """checkpoints_dict = {'T4_a1_b1_g0.5': 'path.pth', ...}. Dùng evaluator.load_model_from_checkpoint."""
+        """checkpoints_dict = {'T4_a1_b1_g0.5': 'path.pth', ...}. Uses evaluator.load_model_from_checkpoint."""
         rows = []
         for name, path in checkpoints_dict.items():
             mdl = evaluator.load_model_from_checkpoint(path, "student")
@@ -733,7 +733,7 @@ class StudentDistillationAblationEvaluator:
 # 7. GRAD-CAM: BASELINE VS STUDENT (CNN)
 # ------------------------------------------------------------------------------
 class _GradCAM:
-    """Grad-CAM cho mạng tích chập: hook vào tầng target_layer."""
+    """Grad-CAM for convolutional networks: attaches hooks to target_layer."""
 
     def __init__(self, model: nn.Module, layer: nn.Module):
         self.model = model
@@ -764,7 +764,7 @@ class _GradCAM:
 
 
 class StudentBaselineCAMComparer:
-    """Đặt Grad-CAM của Baseline và Student cạnh nhau trên cùng một ảnh."""
+    """Display Baseline and Student Grad-CAM side-by-side on the same image."""
 
     def __init__(self, baseline_model: nn.Module, student_model: nn.Module, target_layer_name: str,
                  device: str = "cuda" if torch.cuda.is_available() else "cpu") -> None:
@@ -776,7 +776,7 @@ class StudentBaselineCAMComparer:
     def _layer(self, model: nn.Module) -> nn.Module:
         mods = dict(model.named_modules())
         if self.target_layer_name not in mods:
-            raise KeyError(f"Không có tầng '{self.target_layer_name}'. Ví dụ tên hợp lệ: {list(mods)[-5:]}")
+            raise KeyError(f"Layer '{self.target_layer_name}' not found. Example valid names: {list(mods)[-5:]}")
         return mods[self.target_layer_name]
 
     def generate_side_by_side_cam(
@@ -786,7 +786,7 @@ class StudentBaselineCAMComparer:
         target_class: Optional[int] = None,
         save_path: Optional[str] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """[Ảnh gốc] | [Baseline CAM] | [Student CAM]. rgb_tensor: (1,3,H,W) đã chuẩn hóa; raw_rgb_image: HxWx3 uint8."""
+        """[Original Image] | [Baseline CAM] | [Student CAM]. rgb_tensor: normalized (1,3,H,W); raw_rgb_image: HxWx3 uint8."""
         x = (rgb_tensor if rgb_tensor.dim() == 4 else rgb_tensor.unsqueeze(0)).to(self.device)
         cams, infos = [], []
         for mdl in (self.baseline_model, self.student_model):
@@ -800,8 +800,8 @@ class StudentBaselineCAMComparer:
             infos.append((idx, float(probs[idx])))
         fig, axes = plt.subplots(1, 3, figsize=(13, 4.5))
         axes[0].imshow(raw_rgb_image)
-        axes[0].set_title("Ảnh gốc RGB")
-        for ax, cam, (idx, p), name in zip(axes[1:], cams, infos, ("Baseline (trước KD)", "Student (sau KD)")):
+        axes[0].set_title("Original RGB Image")
+        for ax, cam, (idx, p), name in zip(axes[1:], cams, infos, ("Baseline (before KD)", "Student (after KD)")):
             cam_r = F.interpolate(torch.tensor(cam)[None, None], size=raw_rgb_image.shape[:2], mode="bilinear",
                                   align_corners=False)[0, 0].numpy()
             ax.imshow(raw_rgb_image)
@@ -818,10 +818,10 @@ class StudentBaselineCAMComparer:
 
 
 # ------------------------------------------------------------------------------
-# 8. TỰ KIỂM TRA & CLI
+# 8. SELF-TEST & CLI
 # ------------------------------------------------------------------------------
 def _selftest(output_dir: str) -> None:
-    """Chạy toàn bộ pipeline trên mô hình/dữ liệu ngẫu nhiên để xác nhận mọi hàm hoạt động."""
+    """Run full pipeline on dummy models/random data to verify all functions work."""
     torch.manual_seed(0)
 
     class Tiny(nn.Module):
@@ -856,7 +856,7 @@ def _selftest(output_dir: str) -> None:
 
     db = StudentDeploymentBenchmark(output_dir)
     db.run_and_save({"student": stud, "baseline": base}, (1, 3, 32, 32), ("cpu",))
-    # mô hình sensor (đầu vào 1 chiều)
+    # sensor model (1D input)
     sens = nn.Sequential(nn.Linear(21, 32), nn.ReLU(), nn.Linear(32, 3))
     print("sensor:", db.profile_model_complexity(sens, (1, 21))["params_total"], "params")
 
@@ -869,20 +869,20 @@ def _selftest(output_dir: str) -> None:
     cam = StudentBaselineCAMComparer(base, stud, "conv.2", "cpu")
     raw = (np.random.rand(32, 32, 3) * 255).astype(np.uint8)
     cam.generate_side_by_side_cam(X[:1], raw, save_path=str(Path(output_dir) / "cam_demo.png"))
-    print(f"[SELFTEST OK] Kết quả: {output_dir}")
+    print(f"[SELFTEST OK] Output: {output_dir}")
 
 
 def parse_args():
     import argparse
 
-    p = argparse.ArgumentParser(description="Đánh giá Student / Baseline / Teacher và đo hiệu năng triển khai (CMKD)")
+    p = argparse.ArgumentParser(description="Evaluate Student / Baseline / Teacher and profile deployment metrics (CMKD)")
     p.add_argument("--student-checkpoint", default="checkpoints/student_distilled_best.pth")
     p.add_argument("--baseline-checkpoint", default="checkpoints/unimodal/best_vision_unimodal.pth")
     p.add_argument("--teacher-checkpoint", default="checkpoints/teacher_best.pth")
     p.add_argument("--output-dir", default="workspaces/member3_sensor/03_test_eval_student/results")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    p.add_argument("--selftest", action="store_true", help="Chạy thử toàn bộ pipeline bằng dữ liệu ngẫu nhiên")
+    p.add_argument("--selftest", action="store_true", help="Run full pipeline self-test on synthetic random data")
     return p.parse_args()
 
 
@@ -896,8 +896,8 @@ if __name__ == "__main__":
             teacher_checkpoint_path=args.teacher_checkpoint, output_dir=args.output_dir,
             batch_size=args.batch_size, device=args.device)
         ev = StudentEvaluator(cfg)
-        print("Đã khởi tạo StudentEvaluator. Dùng như thư viện:")
+        print("Initialized StudentEvaluator. Library usage:")
         print("  ev = StudentEvaluator(cfg, model_builders={'student': build_student, 'baseline': build_baseline})")
-        print("  ev.evaluate_and_report(model, loader, 'ten_mo_hinh')    # model + dataloader -> metrics, confusion matrix, log")
+        print("  ev.evaluate_and_report(model, loader, 'model_name')     # model + dataloader -> metrics, confusion matrix, log")
         print("  ev.run_full_evaluation(test_loader=loader)              # Baseline vs Student (vs Teacher)")
-        print("Chạy thử không cần dữ liệu: python eval_student.py --selftest")
+        print("Run self-test without data: python eval_student.py --selftest")

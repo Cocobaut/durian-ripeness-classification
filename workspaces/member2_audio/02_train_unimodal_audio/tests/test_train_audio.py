@@ -1,7 +1,7 @@
-"""Smoke test cho train_audio.py trên dữ liệu âm thanh giả (tiếng gõ tổng hợp), chạy trên CPU.
+"""Smoke test for train_audio.py on synthetic knock audio data, running on CPU.
 
-Chạy: python -m pytest workspaces/member2_audio/02_train_unimodal_audio/tests -q
-Cần ffmpeg (AudioPreprocessor dùng ffmpeg để đọc file).
+Run: python -m pytest workspaces/member2_audio/02_train_unimodal_audio/tests -q
+Requires ffmpeg (AudioPreprocessor uses ffmpeg to decode audio files).
 """
 import shutil
 import sys
@@ -16,14 +16,14 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import train_audio as ta  # noqa: E402
 
-pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="cần ffmpeg")
+pytestmark = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required")
 
 SR = 48000
 FREQ = {"Unripe": 900.0, "Ripe": 650.0, "Overripe": 450.0}
 
 
 def synth_knocks(label: str, seed: int, seconds: float = 12.0) -> np.ndarray:
-    """Chuỗi tiếng gõ: sin tắt dần, tần số phụ thuộc nhãn, cách nhau ~0.8 s, có nhiễu nền."""
+    """Synthetic knock sequence: damped sinusoids with label-dependent frequency, ~0.8 s apart, plus background noise."""
     rng = np.random.default_rng(seed)
     y = 0.002 * rng.standard_normal(int(SR * seconds))
     t = np.arange(int(0.35 * SR)) / SR
@@ -61,7 +61,7 @@ def test_list_audio_files_and_label_check(fake_data):
     assert len(df) == 24 and set(df["label"]) == set(ta.CLASS_ORDER)
     assert set(df["device"]) == {"android", "iphone"}
     bad = manifest.copy()
-    bad.loc[0, "Ripeness"] = "Overripe"  # nhãn manifest mâu thuẫn tên file -> phải báo lỗi
+    bad.loc[0, "Ripeness"] = "Overripe"  # manifest label conflicts with filename -> must raise ValueError
     with pytest.raises(ValueError):
         ta.list_audio_files(fake_data, "train", bad)
 
@@ -82,7 +82,7 @@ def test_smoke_training_end_to_end(fake_data, tmp_path):
     assert {"model_state_dict", "backbone_state_dict", "head_state_dict", "config"} <= set(ckpt)
     assert ckpt["feature_dim"] == 512 and ckpt["class_order"] == ta.CLASS_ORDER
 
-    # Backbone tách riêng nạp được vào model mới
+    # Standalone backbone loads cleanly into a fresh model
     bb = torch.load(tmp_path / "ckpt" / "smoke_audio_backbone_teacher.pth", map_location="cpu", weights_only=False)
     fresh = ta.AudioResNet18()
     fresh.backbone.load_state_dict(bb["backbone_state_dict"])

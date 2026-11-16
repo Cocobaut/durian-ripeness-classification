@@ -1,15 +1,15 @@
-"""Hàm mất mát phân loại dùng cho Unimodal Baselines và Multi-Modal Teacher.
+"""Classification loss functions for Unimodal Baselines and Multi-Modal Teacher.
 
-Dự án: Phân loại độ chín sầu riêng bằng Chưng cất tri thức Đa phương thức (CMKD)
-Tham chiếu đặc tả: Mục 1.3.2 (Teacher học có giám sát từ nhãn thật).
+Project: Durian Ripeness Classification via Cross-Modal Knowledge Distillation (CMKD)
+Specification reference: Section 1.3.2 (Teacher supervised learning from ground-truth labels).
 
-Các cơ chế mất mát chính:
+Main loss mechanisms:
 1. Class-Weighted Cross-Entropy + Label Smoothing.
-2. Focal Loss (focal_gamma > 0) cho thực nghiệm tập trung vào mẫu khó.
+2. Focal Loss (focal_gamma > 0) for focusing on hard boundary samples.
 3. Cost-Sensitive Focal Loss (Ordinal Penalized):
-   - Phạt theo ma trận chi phí phân loại có thứ tự: Unripe (0) -> Ripe (1) -> Overripe (2).
-   - Ngăn chặn lỗi nghiêm trọng (nhầm Unripe <-> Overripe).
-   - Tăng cường phạt lỗi bỏ sót Overripe đoán thành Ripe (vấn đề cốt lõi ở ranh giới mờ).
+   - Penalizes predictions using an ordinal cost matrix: Unripe (0) -> Ripe (1) -> Overripe (2).
+   - Strongly discourages severe mistakes (confusing Unripe <-> Overripe).
+   - Increases penalty for missing Overripe and predicting Ripe (key boundary challenge).
 """
 
 from __future__ import annotations
@@ -21,12 +21,12 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Ma trận chi phí Ordinal mặc định cho 3 lớp: [0: Unripe, 1: Ripe, 2: Overripe]
-# C[y, c] là chi phí khi nhãn thật là y nhưng mô hình dự đoán xác suất rơi vào c.
+# Default ordinal cost matrix for 3 classes: [0: Unripe, 1: Ripe, 2: Overripe]
+# C[y, c] is the cost when true label is y and predicted probability falls on class c.
 DEFAULT_ORDINAL_COST_MATRIX = [
-    [0.0, 1.0, 3.0],  # Thật là Unripe: đoán Ripe phạt 1.0, đoán Overripe phạt 3.0 (cực nặng)
-    [1.0, 0.0, 1.5],  # Thật là Ripe: đoán Unripe phạt 1.0, đoán Overripe phạt 1.5
-    [3.0, 2.0, 0.0],  # Thật là Overripe: đoán Unripe phạt 3.0, đoán Ripe phạt 2.0 (chống bỏ sót Overripe)
+    [0.0, 1.0, 3.0],  # True Unripe: pred Ripe costs 1.0, pred Overripe costs 3.0 (severe)
+    [1.0, 0.0, 1.5],  # True Ripe: pred Unripe costs 1.0, pred Overripe costs 1.5
+    [3.0, 2.0, 0.0],  # True Overripe: pred Unripe costs 3.0, pred Ripe costs 2.0 (prevents missing Overripe)
 ]
 
 
@@ -34,21 +34,21 @@ def compute_class_weights(
     labels: Union[Sequence[int], np.ndarray, torch.Tensor],
     num_classes: int = 3,
 ) -> torch.Tensor:
-    """Trọng số nghịch đảo tần suất: w_c = N / (C * N_c). Lớp vắng mặt được gán N_c = 1."""
+    """Inverse frequency weights: w_c = N / (C * N_c). Absent classes get N_c = 1."""
     y = torch.as_tensor(np.asarray(labels), dtype=torch.long)
     counts = torch.bincount(y, minlength=num_classes).float()
     return counts.sum() / (num_classes * counts.clamp(min=1.0))
 
 
 class CostSensitiveFocalLoss(nn.Module):
-    """Cost-Sensitive Focal Loss kết hợp ma trận chi phí thứ bậc (Ordinal Cost Matrix).
+    """Cost-Sensitive Focal Loss combined with an Ordinal Cost Matrix.
 
-    Công thức:
+    Formula:
         L_total = L_focal + cost_weight * (1 - p_y)^gamma * sum_c (C[y, c] * p_c)
 
-    Lợi ích:
-        - Focal weight (1 - p_y)^gamma tập trung gradient vào các trái ở ranh giới mờ khó phân biệt.
-        - Ma trận chi phí C ép xác suất rời xa các lớp gây nhầm lẫn nguy hiểm hoặc các lớp bị bỏ sót.
+    Benefits:
+        - Focal weight (1 - p_y)^gamma concentrates gradients on ambiguous boundary fruits.
+        - Cost matrix C pushes probability mass away from dangerous or missed classes.
     """
 
     def __init__(
@@ -79,27 +79,27 @@ class CostSensitiveFocalLoss(nn.Module):
         log_probs = F.log_softmax(logits, dim=-1)
         probs = log_probs.exp()
 
-        # 1. Focal loss với nhãn làm mềm (label smoothing)
+        # 1. Focal loss with label smoothing
         q = F.one_hot(targets, num_classes).float()
         if self.label_smoothing > 0:
             q = q * (1.0 - self.label_smoothing) + self.label_smoothing / num_classes
 
-        # Focal cross entropy cho từng mẫu
+        # Per-sample focal cross-entropy
         focal_ce = -(q * (1.0 - probs).pow(self.focal_gamma) * log_probs).sum(dim=-1)  # [B]
 
-        # 2. Thành phần phạt chi phí sai lầm thứ tự (Cost-Sensitive Penalty)
-        # pt: xác suất của lớp đúng
+        # 2. Ordinal cost-sensitive penalty term
+        # pt: probability of the target class
         p_target = probs.gather(1, targets.unsqueeze(1)).squeeze(1)  # [B]
         focal_modulator = (1.0 - p_target).pow(self.focal_gamma)     # [B]
 
-        # sample_cost_vec: vector chi phí C[target, :] cho từng mẫu
+        # sample_cost_vec: cost vector C[target, :] per sample
         sample_cost_vec = self.cost_matrix[targets]                  # [B, C]
         expected_cost = (sample_cost_vec * probs).sum(dim=-1)        # [B]
         cost_penalty = focal_modulator * expected_cost               # [B]
 
         total_sample_loss = focal_ce + self.cost_weight * cost_penalty  # [B]
 
-        # 3. Trọng số cân bằng lớp (Class weights)
+        # 3. Class-balancing weights
         if self.class_weights is not None:
             w = self.class_weights[targets]
             norm = w.sum().clamp(min=1e-12)
@@ -109,12 +109,12 @@ class CostSensitiveFocalLoss(nn.Module):
 
 
 class DurianClassificationLoss(nn.Module):
-    """Hàm mất mát phân loại tích hợp cho dự án Durian Ripeness.
+    """Unified classification loss for the Durian Ripeness project.
 
-    Hỗ trợ 3 chế độ:
-    - 'cost_sensitive_focal' (khuyến nghị): Kết hợp Focal + Ma trận chi phí Ordinal.
-    - 'focal': Focal Loss chuẩn + Label Smoothing.
-    - 'ce': Class-weighted Cross-Entropy chuẩn + Label Smoothing.
+    Supports 3 modes:
+    - 'cost_sensitive_focal' (recommended): Focal Loss + Ordinal Cost Matrix.
+    - 'focal': Standard Focal Loss + Label Smoothing.
+    - 'ce': Standard Class-Weighted Cross-Entropy + Label Smoothing.
     """
 
     def __init__(
@@ -162,7 +162,7 @@ class DurianClassificationLoss(nn.Module):
                 label_smoothing=self.label_smoothing,
             )
 
-        # Chế độ focal tiêu chuẩn
+        # Standard focal loss mode
         num_classes = logits.size(-1)
         log_probs = F.log_softmax(logits, dim=-1)
         probs = log_probs.exp()

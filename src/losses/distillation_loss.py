@@ -1,24 +1,24 @@
-"""Hàm mất mát Chưng cất tri thức Liên phương thức (Cross-Modal Knowledge Distillation Loss).
+"""Cross-Modal Knowledge Distillation Loss.
 
-Dự án: Phân loại độ chín sầu riêng bằng Chưng cất tri thức Đa phương thức (CMKD)
-Tham chiếu đặc tả: Mục 1.3.3 (Giai đoạn 2 - Vision-Only Student).
+Project: Durian Ripeness Classification via Cross-Modal Knowledge Distillation (CMKD)
+Specification reference: Section 1.3.3 (Stage 2 - Vision-Only Student).
 
-Công thức tổng hợp 3 thành phần:
+Composite 3-term formula:
     L_total = alpha * L_CE(y, z_student)
             + beta  * L_KD(z_student, z_teacher; T)
             + gamma * L_feat(phi(f_img_student), f_mm_teacher)
 
-Trong đó:
+Where:
 1. L_CE (Hard-label Loss):
-   Sử dụng `DurianClassificationLoss` (mặc định là Cost-Sensitive Focal Loss kết hợp ma trận
-   phạt chi phí thứ tự Ordinal hoặc Cross-Entropy có trọng số lớp).
+   Uses `DurianClassificationLoss` (defaults to Cost-Sensitive Focal Loss with an ordinal
+   cost matrix or class-weighted Cross-Entropy).
 2. L_KD (Response-based Logit Matching):
    T^2 * KL_Div(softmax(z_student / T) || softmax(z_teacher / T)).
-   Truyền đạt "tri thức tối" (Dark Knowledge) về xác suất chuyển tiếp giữa các mức độ chín.
+   Transfers "dark knowledge" about transition probabilities between ripeness stages.
 3. L_feat (Feature-based Latent Alignment):
-   Căn chỉnh vector đặc trưng ảnh đã chiếu `f_proj = phi(f_img_student)` [B, 256]
-   với vector đa phương thức hợp nhất `f_mm` [B, 256] của Teacher bằng khoảng cách Cosine
-   (`1 - cos_sim`) hoặc MSE trên vector chuẩn hóa L2.
+   Aligns the projected image embedding `f_proj = phi(f_img_student)` [B, 256]
+   with the Teacher's fused multimodal embedding `f_mm` [B, 256] using Cosine distance
+   (`1 - cos_sim`) or MSE on L2-normalized vectors.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ from src.losses.classification_loss import DurianClassificationLoss
 
 
 class CrossModalDistillationLoss(nn.Module):
-    """Hàm mất mát tổng hợp 3 thành phần cho huấn luyện Vision-Only Student."""
+    """3-term composite loss for training the Vision-Only Student."""
 
     def __init__(
         self,
@@ -51,9 +51,9 @@ class CrossModalDistillationLoss(nn.Module):
     ) -> None:
         super().__init__()
         if feat_loss_type not in ("cosine", "mse", "cosine_mse"):
-            raise ValueError(f"feat_loss_type phải thuộc ('cosine', 'mse', 'cosine_mse'), nhận {feat_loss_type!r}")
+            raise ValueError(f"feat_loss_type must be in ('cosine', 'mse', 'cosine_mse'), got {feat_loss_type!r}")
         if temperature <= 0:
-            raise ValueError(f"temperature phải > 0, nhận {temperature}")
+            raise ValueError(f"temperature must be > 0, got {temperature}")
 
         self.alpha = float(alpha)
         self.beta = float(beta)
@@ -75,7 +75,7 @@ class CrossModalDistillationLoss(nn.Module):
         logits_student: torch.Tensor,
         logits_teacher: torch.Tensor,
     ) -> torch.Tensor:
-        """Tính L_KD = T^2 * KL(softmax(z_t / T) || softmax(z_s / T))."""
+        """Compute L_KD = T^2 * KL(softmax(z_t / T) || softmax(z_s / T))."""
         t = self.temperature
         log_probs_s = F.log_softmax(logits_student.float() / t, dim=-1)
         probs_t = F.softmax(logits_teacher.detach().float() / t, dim=-1)
@@ -86,15 +86,15 @@ class CrossModalDistillationLoss(nn.Module):
         f_proj_student: torch.Tensor,
         f_mm_teacher: torch.Tensor,
     ) -> torch.Tensor:
-        """Tính L_feat giữa phi(f_img_student) và f_mm_teacher."""
+        """Compute L_feat between phi(f_img_student) and f_mm_teacher."""
         s = f_proj_student.float()
         t = f_mm_teacher.detach().float()
         if s.shape != t.shape:
             raise ValueError(
-                f"Kích thước f_proj_student {tuple(s.shape)} không khớp f_mm_teacher {tuple(t.shape)}."
+                f"f_proj_student shape {tuple(s.shape)} does not match f_mm_teacher shape {tuple(t.shape)}."
             )
 
-        # Chỉ tính trên các mẫu mà f_mm_teacher khác vector 0
+        # Compute only over samples where f_mm_teacher is non-zero
         valid_mask = t.abs().amax(dim=-1) > 1e-8
         if not valid_mask.any():
             return s.sum() * 0.0
@@ -122,7 +122,7 @@ class CrossModalDistillationLoss(nn.Module):
         f_mm_teacher: torch.Tensor,
         targets: torch.Tensor,
     ) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Tính tổng hợp mất mát L_total và trả về kèm dict thành phần để log."""
+        """Compute composite L_total and return alongside component dictionary for logging."""
         logits_s = logits_student.float()
         loss_ce = self.ce_criterion(logits_s, targets) if self.alpha > 0 else logits_s.sum() * 0.0
         loss_kd = self.compute_kd_loss(logits_s, logits_teacher) if self.beta > 0 else logits_s.sum() * 0.0

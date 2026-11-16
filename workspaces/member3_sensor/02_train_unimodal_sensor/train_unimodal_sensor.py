@@ -1,36 +1,36 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Huấn luyện Unimodal Baseline cho nhánh Cảm biến / Bảng / Nhiệt / Đa phổ (Tuần 2).
+"""Train Unimodal Baseline for Sensor / Tabular / Thermal / Multispectral Modality (Week 2).
 
-Phụ trách: Member 3
+Responsible: Member 3
 
-MÔ HÌNH ĐƯỢC CHỌN (ghi chú theo yêu cầu kế hoạch):
+SELECTED MODEL (per plan requirements):
     SensorBackbone (MLP: Linear -> LayerNorm -> ReLU -> Dropout, hidden=(64, 48), latent=32)
-    + Classification Head tuyến tính (32 -> 3). Định nghĩa trong
+    + Linear Classification Head (32 -> 3). Defined in
     workspaces/member3_sensor/01_eda_and_preprocess_sensor/preprocess_sensor.py.
-    Lý do: chỉ có 132 mẫu train nên cần mạng nhỏ; LayerNorm ổn định với batch nhỏ;
-    Random Forest được chạy song song làm đối chứng phi-nơ-ron.
+    Rationale: only 132 training samples require a compact network; LayerNorm is stable for small batches;
+    Random Forest runs in parallel as a non-neural reference baseline.
 
-QUY TRÌNH:
-    1. Đọc data/final/{train,valid,test}/durian_characteristics_clean.csv.
-    2. Trích đặc trưng nhiệt (3) và đa phổ (8) TỪ FILE THẬT trong thermal/ và multispectral/
-       (các cột fg_mean_temp, band_k_mean trong manifest chỉ là chỗ trống = 0).
-       Quả thiếu modality => NaN => điền median của Train + cờ mask_thermal / mask_multispectral.
-    3. Fit SensorPreprocessor CHỈ trên Train, transform Val/Test.
-    4. Train MLP: CE + label smoothing, AdamW (weight decay), Gaussian noise, early stopping theo
-       Val Macro-F1. Chạy nhiều seed. Chọn checkpoint CHỈ dựa trên Val, Test chỉ để báo cáo.
-    5. Xuất: best_sensor_unimodal.pth (backbone và head tách riêng), bảng benchmark, confusion matrix.
+PIPELINE:
+    1. Load data/final/{train,valid,test}/durian_characteristics_clean.csv.
+    2. Extract thermal (3) and multispectral (8) features FROM ACTUAL FILES in thermal/ and multispectral/
+       (fg_mean_temp, band_k_mean columns in manifest are zero placeholders).
+       Fruits missing a modality => NaN => imputed with Train median + mask_thermal / mask_multispectral flags.
+    3. Fit SensorPreprocessor ONLY on Train, then transform Val/Test.
+    4. Train MLP: CE + label smoothing, AdamW (weight decay), Gaussian noise, early stopping on
+       Val Macro-F1 across multiple seeds. Select checkpoint ONLY on Val; Test is for reporting only.
+    5. Export: best_sensor_unimodal.pth (detached backbone and head), benchmark table, confusion matrices.
 
-CÁCH DÙNG (chạy từ thư mục gốc của repo):
+USAGE (run from repository root):
     python workspaces/member3_sensor/02_train_unimodal_sensor/train_unimodal_sensor.py
     python ... --feature-sets C_integrated19 A_nondestructive --seeds 42 43 44
 
-CÁCH TUẦN 3 NẠP LẠI BACKBONE:
+HOW WEEK 3 RELOADS BACKBONE:
     ck = torch.load("checkpoints/unimodal/best_sensor_unimodal.pth", map_location="cpu")
     net = SensorBackbone(input_dim=ck["input_dim"], hidden_dims=ck["hidden_dims"],
                          latent_dim=ck["latent_dim"], num_classes=ck["num_classes"])
-    net.encoder.load_state_dict(ck["backbone_state_dict"])   # chỉ backbone -> f_sensor
-    # net.classifier.load_state_dict(ck["head_state_dict"])  # head (bỏ qua khi ghép Teacher)
+    net.encoder.load_state_dict(ck["backbone_state_dict"])   # backbone only -> f_sensor
+    # net.classifier.load_state_dict(ck["head_state_dict"])  # head (ignored during Teacher fusion)
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ from sklearn.metrics import (
 
 
 # ------------------------------------------------------------------------------
-# 0. THIẾT LẬP ĐƯỜNG DẪN & IMPORT preprocess_sensor
+# 0. PATH SETUP & IMPORT preprocess_sensor
 # ------------------------------------------------------------------------------
 def find_repo_root() -> Path:
     here = Path(__file__).resolve().parent
@@ -79,7 +79,7 @@ def find_repo_root() -> Path:
 def import_preprocess(repo_root: Path, override: str | None):
     pre_dir = Path(override) if override else repo_root / "workspaces" / "member3_sensor" / "01_eda_and_preprocess_sensor"
     if not (pre_dir / "preprocess_sensor.py").exists():
-        raise FileNotFoundError(f"Không thấy preprocess_sensor.py trong {pre_dir}")
+        raise FileNotFoundError(f"preprocess_sensor.py not found in {pre_dir}")
     sys.path.insert(0, str(pre_dir))
     import preprocess_sensor as P  
 
@@ -87,7 +87,7 @@ def import_preprocess(repo_root: Path, override: str | None):
 
 
 # ------------------------------------------------------------------------------
-# 1. TRÍCH ĐẶC TRƯNG NHIỆT & ĐA PHỔ TỪ FILE THẬT
+# 1. EXTRACT THERMAL & MULTISPECTRAL FEATURES FROM ACTUAL FILES
 # ------------------------------------------------------------------------------
 def _fruit_id_from_name(name: str):
     m = re.search(r"durian_?0*(\d+)", name, re.IGNORECASE)
@@ -95,7 +95,7 @@ def _fruit_id_from_name(name: str):
 
 
 def collect_files(folder: Path, exts: set) -> dict:
-    """Gom file theo fruit_id (tìm đệ quy, phòng trường hợp bị lồng thêm một cấp thư mục)."""
+    """Group files by fruit_id (recursive search in case of nested subdirectories)."""
     out: dict = {}
     if not folder.is_dir():
         return out
@@ -126,7 +126,7 @@ def multispectral_vector(P, files) -> list:
             continue
         ft = P.extract_multispectral_features(raw)
         v = [ft[c] for c in P.MULTISPECTRAL_FEATURE_COLS]
-        if all(x == 0.0 for x in v):  # định dạng không nhận ra / ảnh rỗng => coi như thiếu
+        if all(x == 0.0 for x in v):  # unrecognized format / empty image => treat as missing
             continue
         rows.append(v)
     return list(np.mean(rows, axis=0)) if rows else [np.nan] * len(P.MULTISPECTRAL_FEATURE_COLS)
@@ -135,12 +135,12 @@ def multispectral_vector(P, files) -> list:
 def load_split(P, data_dir: Path, split: str, cache_dir: Path, rebuild: bool) -> pd.DataFrame:
     csv_path = data_dir / split / "durian_characteristics_clean.csv"
     if not csv_path.exists():
-        raise FileNotFoundError(f"Không thấy {csv_path}. Bạn đã tải và đặt data/final đúng cấu trúc chưa?")
+        raise FileNotFoundError(f"{csv_path} not found. Have you downloaded and placed data/final properly?")
     df = pd.read_csv(csv_path)
 
     fid_calc = P.make_fruit_id(df)
     if "fruit_id" in df.columns and (df["fruit_id"].astype(str).values != np.array(fid_calc)).any():
-        raise ValueError(f"[{split}] cột fruit_id không khớp với Replicate, kiểm tra lại CSV.")
+        raise ValueError(f"[{split}] fruit_id column does not match Replicate; check CSV.")
     df["fruit_id"] = fid_calc
 
     cache_path = cache_dir / f"sensor_features_{split}.csv"
@@ -166,7 +166,7 @@ def load_split(P, data_dir: Path, split: str, cache_dir: Path, rebuild: bool) ->
 
 
 # ------------------------------------------------------------------------------
-# 2. CÁC BỘ ĐẶC TRƯNG (FEATURE SETS)
+# 2. FEATURE SETS
 # ------------------------------------------------------------------------------
 def make_feature_sets(P) -> dict:
     phys = ["Harvest_Weight", "Horizontal_Circumference", "Vertical_Circumference", "Pedicel_Diameter"]
@@ -174,22 +174,22 @@ def make_feature_sets(P) -> dict:
     th, ms = list(P.THERMAL_FEATURE_COLS), list(P.MULTISPECTRAL_FEATURE_COLS)
     mth, mms = ["mask_thermal"], ["mask_multispectral"]
     return {
-        # Chính thức theo thiết kế của Khải: 8 cột bảng + 3 nhiệt + 8 đa phổ (+ 2 cờ mask)
+        # Official integrated design: 8 tabular cols + 3 thermal + 8 multispectral (+ 2 mask flags)
         "C_integrated19": list(P.DEFAULT_FEATURE_COLS) + th + ms + mth + mms,
-        # Không dùng phép đo phá hủy (Firmness/TSS/Dry matter) và không dùng ESR_Days
+        # Non-destructive features only (excludes Firmness/TSS/Dry matter and ESR_Days)
         "A_nondestructive": phys + th + ms + mth + mms,
-        # A + 3 phép đo lab (privileged information)
+        # Non-destructive + 3 lab measurements (privileged information)
         "B_with_lab": phys + lab + th + ms + mth + mms,
-        # Chỉ 8 cột bảng
+        # Tabular 8 columns only
         "T_tabular8": list(P.DEFAULT_FEATURE_COLS),
-        # Từng nguồn riêng lẻ để đo mức đóng góp
+        # Individual modalities for ablation measurement
         "H_thermal_only": th + mth,
         "M_multispectral_only": ms + mms,
     }
 
 
 # ------------------------------------------------------------------------------
-# 3. METRICS, PROFILING, VẼ
+# 3. METRICS, PROFILING, PLOTTING
 # ------------------------------------------------------------------------------
 def compute_metrics(P, y_true, y_pred, probs) -> dict:
     labels = list(range(len(P.CLASS_ORDER)))
@@ -237,8 +237,8 @@ def plot_confusion(P, y_true, y_pred, title: str, path: Path) -> None:
     ax.set_yticks(labels)
     ax.set_xticklabels(P.CLASS_ORDER)
     ax.set_yticklabels(P.CLASS_ORDER)
-    ax.set_xlabel("Dự đoán")
-    ax.set_ylabel("Thực tế")
+    ax.set_xlabel("Predicted")
+    ax.set_ylabel("Actual")
     ax.set_title(title, fontsize=10)
     for i in labels:
         for j in labels:
@@ -258,7 +258,7 @@ def df_to_markdown(df: pd.DataFrame) -> str:
 
 
 # ------------------------------------------------------------------------------
-# 4. HUẤN LUYỆN MỘT LẦN CHẠY (1 feature set, 1 seed)
+# 4. SINGLE RUN TRAINING (1 feature set, 1 seed)
 # ------------------------------------------------------------------------------
 def set_seed(seed: int) -> None:
     np.random.seed(seed)
@@ -275,7 +275,7 @@ def predict(model, X, device):
 def train_one(P, cols, seed, tr, va, te, args, device):
     set_seed(seed)
     pre = P.SensorPreprocessor(feature_cols=cols, log_cols=("Firmness_AVE",), scaler_type="standard")
-    pre.fit_scaler(tr)  # CHỈ fit trên Train
+    pre.fit_scaler(tr)  # Fit ONLY on Train
     pre.check_no_overlap(va, "Val")
     pre.check_no_overlap(te, "Test")
 
@@ -284,7 +284,7 @@ def train_one(P, cols, seed, tr, va, te, args, device):
     Xte, yte = pre.to_tensor(te), pre.encode_labels(te)
 
     counts = torch.bincount(ytr, minlength=len(P.CLASS_ORDER)).float()
-    class_w = (counts.sum() / (len(counts) * counts.clamp(min=1))).to(device)  # Weighted CE (cân bằng thì = 1)
+    class_w = (counts.sum() / (len(counts) * counts.clamp(min=1))).to(device)  # Weighted CE (1.0 when balanced)
     crit_train = nn.CrossEntropyLoss(weight=class_w, label_smoothing=args.label_smoothing)
 
     model = P.SensorBackbone(
@@ -355,16 +355,16 @@ def random_forest_baseline(P, cols, tr, va, te, seed, importance_path=None):
 # 5. MAIN
 # ------------------------------------------------------------------------------
 def parse_args(repo_root: Path):
-    ap = argparse.ArgumentParser(description="Unimodal Baseline: nhánh Sensor/Thermal/Multispectral")
+    ap = argparse.ArgumentParser(description="Unimodal Baseline: Sensor/Thermal/Multispectral branch")
     ap.add_argument("--repo-root", default=str(repo_root))
-    ap.add_argument("--preprocess-dir", default=None, help="Thư mục chứa preprocess_sensor.py (mặc định theo repo)")
-    ap.add_argument("--data-dir", default=None, help="Mặc định <repo>/data/final")
+    ap.add_argument("--preprocess-dir", default=None, help="Directory containing preprocess_sensor.py (default from repo)")
+    ap.add_argument("--data-dir", default=None, help="Default: <repo>/data/final")
     ap.add_argument("--out-dir", default=None,
-                    help="Mặc định <repo>/workspaces/member3_sensor/02_train_unimodal_sensor/results")
-    ap.add_argument("--ckpt-dir", default=None, help="Mặc định <repo>/checkpoints/unimodal")
-    ap.add_argument("--feature-sets", nargs="+", default=None, help="Mặc định: chạy tất cả")
+                    help="Default: <repo>/workspaces/member3_sensor/02_train_unimodal_sensor/results")
+    ap.add_argument("--ckpt-dir", default=None, help="Default: <repo>/checkpoints/unimodal")
+    ap.add_argument("--feature-sets", nargs="+", default=None, help="Default: run all feature sets")
     ap.add_argument("--official-set", default="C_integrated19",
-                    help="Bộ đặc trưng dùng cho best_sensor_unimodal.pth")
+                    help="Feature set used for best_sensor_unimodal.pth")
     ap.add_argument("--seeds", nargs="+", type=int, default=[42, 43, 44])
     ap.add_argument("--epochs", type=int, default=300)
     ap.add_argument("--patience", type=int, default=50)
@@ -373,11 +373,11 @@ def parse_args(repo_root: Path):
     ap.add_argument("--weight-decay", type=float, default=1e-2)
     ap.add_argument("--label-smoothing", type=float, default=0.1)
     ap.add_argument("--dropout", type=float, default=0.3)
-    ap.add_argument("--noise", type=float, default=0.05, help="Độ lệch chuẩn nhiễu Gaussian lúc train")
+    ap.add_argument("--noise", type=float, default=0.05, help="Gaussian noise std during training")
     ap.add_argument("--hidden", nargs="+", type=int, default=[64, 48])
     ap.add_argument("--latent", type=int, default=32)
     ap.add_argument("--device", default="cpu")
-    ap.add_argument("--rebuild-features", action="store_true", help="Bỏ cache, trích lại đặc trưng từ file")
+    ap.add_argument("--rebuild-features", action="store_true", help="Ignore cache and re-extract features from raw files")
     return ap.parse_args()
 
 
@@ -395,24 +395,24 @@ def main():
         d.mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
 
-    # ---- Nạp dữ liệu & kiểm tra ------------------------------------------------
+    # ---- Load data & validate --------------------------------------------------
     print("=" * 78)
-    print("[1/4] Nạp dữ liệu và trích đặc trưng nhiệt / đa phổ từ file ...")
+    print("[1/4] Loading data and extracting thermal / multispectral features from files ...")
     tr = load_split(P, data_dir, "train", out_dir, args.rebuild_features)
     va = load_split(P, data_dir, "valid", out_dir, args.rebuild_features)
     te = load_split(P, data_dir, "test", out_dir, args.rebuild_features)
     for name, d in (("train", tr), ("valid", va), ("test", te)):
-        print(f"  {name:<6}: {len(d):>3} quả | có thermal: {int(d.mask_thermal.sum()):>3} | "
-              f"có multispectral: {int(d.mask_multispectral.sum()):>3} | "
-              f"nhãn: {d['Ripeness'].value_counts().to_dict()}")
+        print(f"  {name:<6}: {len(d):>3} fruits | thermal: {int(d.mask_thermal.sum()):>3} | "
+              f"multispectral: {int(d.mask_multispectral.sum()):>3} | "
+              f"labels: {d['Ripeness'].value_counts().to_dict()}")
     if tr.mask_thermal.sum() == 0 or tr.mask_multispectral.sum() == 0:
         raise RuntimeError(
-            "Không trích được đặc trưng nhiệt hoặc đa phổ ở tập Train (0 quả có dữ liệu). "
-            f"Kiểm tra {data_dir/'train'/'thermal'} (cần file .csv) và {data_dir/'train'/'multispectral'} "
-            "(cần file .tif); tên file phải chứa 'durian_XXX'."
+            "Failed to extract thermal or multispectral features in Train (0 fruits available). "
+            f"Check {data_dir/'train'/'thermal'} (requires .csv) and {data_dir/'train'/'multispectral'} "
+            "(requires .tif); filenames must contain 'durian_XXX'."
         )
     ids = [set(d.fruit_id) for d in (tr, va, te)]
-    assert not (ids[0] & ids[1]) and not (ids[0] & ids[2]) and not (ids[1] & ids[2]), "Rò rỉ fruit_id giữa các tập!"
+    assert not (ids[0] & ids[1]) and not (ids[0] & ids[2]) and not (ids[1] & ids[2]), "fruit_id leakage across splits!"
 
     fsets = make_feature_sets(P)
     chosen = args.feature_sets or list(fsets)
@@ -420,13 +420,13 @@ def main():
         chosen.append(args.official_set)
     for fs in chosen:
         if fs not in fsets:
-            raise KeyError(f"Bộ đặc trưng không tồn tại: {fs}. Có: {list(fsets)}")
+            raise KeyError(f"Feature set does not exist: {fs}. Available: {list(fsets)}")
         miss = [c for c in fsets[fs] if c not in tr.columns]
         if miss:
-            raise KeyError(f"[{fs}] thiếu cột trong dữ liệu: {miss}")
+            raise KeyError(f"[{fs}] missing columns in data: {miss}")
 
-    # ---- Huấn luyện ------------------------------------------------------------
-    print("[2/4] Huấn luyện MLP + Random Forest ...")
+    # ---- Train -----------------------------------------------------------------
+    print("[2/4] Training MLP + Random Forest ...")
     run_rows, bench_rows = [], []
     best_official = None
     for fs in chosen:
@@ -447,7 +447,7 @@ def main():
             torch.save({"full_state_dict": model.state_dict(), "feature_cols": cols},
                        runs_dir / f"sensor_{fs}_seed{seed}.pth")
             if fs == args.official_set:
-                key = res["val"]["macro_f1"]  # chọn theo Val Macro-F1
+                key = res["val"]["macro_f1"]  # select by Val Macro-F1
                 if best_official is None or key > best_official["key"]:
                     best_official = {"key": key, "model": model, "pre": pre, "res": res, "seed": seed, "cols": cols}
 
@@ -471,15 +471,15 @@ def main():
             "params": np.nan, "latency_ms": np.nan,
         })
 
-    # ---- Lưu kết quả -----------------------------------------------------------
-    print("[3/4] Lưu checkpoint chính thức và bảng benchmark ...")
+    # ---- Save results ----------------------------------------------------------
+    print("[3/4] Saving official checkpoint and benchmark table ...")
     pre_path = out_dir / "sensor_preprocessor_unimodal.joblib"
     best_official["pre"].save(pre_path)
     ck_path = ckpt_dir / "best_sensor_unimodal.pth"
     m = best_official["model"]
     torch.save({
-        "backbone_state_dict": m.encoder.state_dict(),     # f_sensor in R^latent (dùng cho Teacher Tuần 3)
-        "head_state_dict": m.classifier.state_dict(),      # Classification Head tách riêng
+        "backbone_state_dict": m.encoder.state_dict(),     # f_sensor in R^latent (for Week 3 Teacher)
+        "head_state_dict": m.classifier.state_dict(),      # Detached Classification Head
         "full_state_dict": m.state_dict(),
         "input_dim": len(best_official["cols"]), "hidden_dims": list(args.hidden),
         "latent_dim": args.latent, "num_classes": len(P.CLASS_ORDER), "dropout": args.dropout,
@@ -503,12 +503,12 @@ def main():
         "val": best_official["res"]["val"], "test": best_official["res"]["test"],
     }, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    print("[4/4] Bảng benchmark:")
+    print("[4/4] Benchmark table:")
     print(bench.to_string(index=False))
     print("-" * 78)
-    print(f"Checkpoint chính thức : {ck_path}")
-    print(f"Bộ đặc trưng          : {args.official_set} (seed {best_official['seed']}, chọn theo Val Macro-F1)")
-    print(f"Kết quả & biểu đồ     : {out_dir}")
+    print(f"Official checkpoint : {ck_path}")
+    print(f"Feature set         : {args.official_set} (seed {best_official['seed']}, selected by Val Macro-F1)")
+    print(f"Results & plots     : {out_dir}")
 
 
 if __name__ == "__main__":
