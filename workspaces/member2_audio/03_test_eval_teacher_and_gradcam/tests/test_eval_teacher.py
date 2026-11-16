@@ -1,6 +1,6 @@
-"""Test cho eval_teacher.py: dùng mô hình giả và dữ liệu ngẫu nhiên nhỏ, chạy trên CPU.
+"""Unit tests for eval_teacher.py: uses dummy models and small random data on CPU.
 
-Chạy: python -m pytest workspaces/member2_audio/03_test_eval_teacher_and_gradcam/tests -q
+Run: python -m pytest workspaces/member2_audio/03_test_eval_teacher_and_gradcam/tests -q
 """
 import json
 import math
@@ -19,10 +19,10 @@ import eval_teacher as et  # noqa: E402
 
 
 # ------------------------------------------------------------------
-# Mô hình và dữ liệu giả
+# Dummy models and data
 # ------------------------------------------------------------------
 class FakeAudioModel(nn.Module):
-    """Mô hình đơn phương thức: logits suy ra từ giá trị trung bình của 3 dải đầu vào."""
+    """Unimodal dummy model: logits derived from the first 3 flattened input values."""
 
     def __init__(self, return_tuple: bool = True):
         super().__init__()
@@ -35,7 +35,7 @@ class FakeAudioModel(nn.Module):
 
 
 class FakeTeacher(nn.Module):
-    """Teacher giả: chỉ dựa vào nhánh audio, nên che audio sẽ làm hiệu năng giảm."""
+    """Dummy Teacher: relies solely on audio, so masking audio drops performance."""
 
     def __init__(self):
         super().__init__()
@@ -51,7 +51,7 @@ def make_inputs(labels, noise=0.1, seed=0):
     x = noise * torch.randn(len(labels), 1, 4, 4, generator=g)
     flat = x.view(len(labels), -1)
     for i, y in enumerate(labels):
-        flat[i, y] += 1.0  # tín hiệu đúng lớp nằm ở vị trí y
+        flat[i, y] += 1.0  # ground-truth class signal placed at index y
     return x
 
 
@@ -61,7 +61,7 @@ class AudioDictDataset(Dataset):
         self.labels = labels
         self.fruit_ids = fruit_ids
         self.devices = devices
-        for i in flip:  # cố tình làm sai một vài mẫu
+        for i in flip:  # intentionally corrupt a few samples
             self.x.view(len(labels), -1)[i, :3] = torch.tensor([0.0, 0.0, 0.0])
             self.x.view(len(labels), -1)[i, (labels[i] + 1) % 3] = 1.0
 
@@ -141,10 +141,10 @@ def test_fruit_level_strategies(tmp_path):
     })
     mean_df = ev.evaluate_fruit_level(sample_df, "mean_prob").set_index("fruit_id")
     vote_df = ev.evaluate_fruit_level(sample_df, "majority_vote").set_index("fruit_id")
-    # quả a: trung bình xác suất -> Ripe (0.567), bỏ phiếu -> Overripe (2 phiếu)
+    # fruit a: mean probability -> Ripe (0.567), majority vote -> Overripe (2 votes)
     assert mean_df.loc["a", "pred_label"] == "Ripe"
     assert vote_df.loc["a", "pred_label"] == "Overripe"
-    # quả b: hòa phiếu 1-1 (Unripe vs Ripe), tổng xác suất Unripe 0.9 > Ripe 0.7 -> Unripe
+    # fruit b: 1-1 tie (Unripe vs Ripe), summed probability Unripe 0.9 > Ripe 0.7 -> Unripe
     assert vote_df.loc["b", "pred_label"] == "Unripe"
     assert mean_df.loc["a", "n_samples"] == 3
     for c in ["true_label", "pred_label", "prob_unripe_mean", "prob_ripe_mean", "prob_overripe_mean", "is_correct"]:
@@ -163,7 +163,7 @@ def test_compute_metrics_perfect_and_missing_class(tmp_path):
                 "sample_pr_auc_macro", "sample_log_loss", "sample_f1_overripe", "sample_support_ripe"]:
         assert key in m
 
-    # Thiếu lớp Overripe trong y_true: không crash, ROC-AUC macro = NaN
+    # Missing Overripe class in y_true: should not crash, macro ROC-AUC = NaN
     y2 = np.array([0, 0, 1, 1])
     p2 = np.array([[0.7, 0.2, 0.1], [0.6, 0.3, 0.1], [0.2, 0.7, 0.1], [0.3, 0.3, 0.4]])
     m2 = ev.compute_metrics(y2, p2.argmax(1), p2)
@@ -179,7 +179,7 @@ def test_full_pipeline_audio_outputs(tmp_path):
                  "metrics_by_device.csv", "eval.log", "cm_sample_counts.png", "cm_sample_normalized.png",
                  "cm_fruit_counts.png", "cm_fruit_normalized.png"]:
         assert (tmp_path / f"val_{name}").exists(), name
-    assert not (tmp_path / "val_ablation.csv").exists()  # đơn phương thức: không ablation
+    assert not (tmp_path / "val_ablation.csv").exists()  # unimodal: no ablation
     long = pd.read_csv(tmp_path / "val_metrics.csv")
     assert set(long.columns) == {"model", "split", "level", "metric", "value"}
     assert set(long["level"]) == {"sample", "fruit"}
@@ -202,7 +202,7 @@ def test_multimodal_ablation(tmp_path):
     abl = res["ablation"]
     assert set(abl) == {"full", "wo_audio", "wo_sensor", "wo_vision"}
     assert abl["full"]["sample_macro_f1"] == 1.0
-    assert abl["wo_audio"]["delta_sample_macro_f1"] > 0.3  # che audio thì giảm mạnh
+    assert abl["wo_audio"]["delta_sample_macro_f1"] > 0.3  # masking audio causes sharp drop
     assert abl["wo_sensor"]["delta_sample_macro_f1"] == pytest.approx(0.0)
     assert (tmp_path / "test_ablation.csv").exists()
 
@@ -234,5 +234,5 @@ def test_invalid_input_mode(tmp_path):
 
 
 def test_gradcam_and_error_analyzer_still_importable():
-    # Phần Tuần 4 vẫn giữ khung, chỉ cần import được
+    # Week 4 scaffold remains intact and importable
     assert hasattr(et, "TeacherGradCAMVisualizer") and hasattr(et, "TeacherErrorAnalyzer")

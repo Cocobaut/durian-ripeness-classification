@@ -1,15 +1,15 @@
-"""Đánh giá độc lập mô hình Vision-Only Student (Giai đoạn 2 CMKD) ở cấp Sample & Fruit.
+"""Independent evaluation of Vision-Only Student (CMKD Stage 2) at Sample & Fruit levels.
 
-Dự án: Phân loại độ chín sầu riêng bằng Chưng cất tri thức Đa phương thức (CMKD)
-Tham chiếu đặc tả: Mục 1.3.3 & Mục 1.4.
+Project: Durian Ripeness Classification via Cross-Modal Knowledge Distillation (CMKD)
+Specification reference: Sections 1.3.3 & 1.4.
 
-Đặc điểm quan trọng:
-- Khi đánh giá / suy luận thực tế, Student CHỈ NHẬN ẢNH RGB (`ImageDataset`, `input_mode="vision"`).
-- Không cần micro thu âm, không cần cảm biến và không cần mô hình Teacher.
-- Tự động tổng hợp bảng đối sánh `benchmark_comparison.csv` & `benchmark_comparison.md` giữa:
+Key characteristics:
+- During evaluation / deployment inference, Student ONLY RECEIVES RGB IMAGES (`ImageDataset`, `input_mode="vision"`).
+- Does not require a microphone, physical sensors, or the Teacher model.
+- Automatically builds `benchmark_comparison.csv` & `benchmark_comparison.md` comparing:
   Vision Unimodal vs Audio Unimodal vs Sensor Unimodal vs Multi-Modal Teacher vs Vision-Only Student.
 
-Cách chạy (từ thư mục gốc dự án):
+Usage (from project root):
     python workspaces/member1_vision_lead/04_train_teacher_and_student/eval_student.py \
         --checkpoint checkpoints/studentmodal/best_student.pth \
         --split test
@@ -48,7 +48,7 @@ logger = logging.getLogger("eval_student")
 
 
 class _ManifestFallbackImageDataset(torch.utils.data.Dataset):
-    """Dataset dự phòng khi chạy smoke/test trên máy local chưa tải thư mục ảnh RGB."""
+    """Fallback dataset for smoke/test runs on local machines without downloaded RGB images."""
 
     def __init__(self, fruit_ids, labels, image_size: int = IMAGE_SIZE):
         self.fruit_ids = list(fruit_ids)
@@ -69,7 +69,7 @@ def build_vision_eval_dataset(
     split: str,
     image_size: int = IMAGE_SIZE,
 ):
-    """Tạo `ImageDataset` chỉ chứa các mẫu có ảnh RGB thật cho tập `valid` hoặc `test`."""
+    """Build `ImageDataset` containing only samples with real RGB images for `valid` or `test`."""
     resolved_split = split_dir_name(split)
     manifest = pd.read_csv(resolve_path(manifest_path))
     fruits = manifest[manifest["Split"] == resolved_split].sort_values("fruit_id")
@@ -78,7 +78,7 @@ def build_vision_eval_dataset(
     records = list_rgb_images(rgb_dir)
     ds = ImageDataset(records, label_map, transform=get_eval_transforms(image_size))
     if len(ds) == 0:
-        logger.warning(f"Không tìm thấy ảnh RGB tại {rgb_dir}; dùng fallback từ manifest ({len(fruits)} quả).")
+        logger.warning(f"No RGB images found at {rgb_dir}; using fallback from manifest ({len(fruits)} fruits).")
         return _ManifestFallbackImageDataset(fruits["fruit_id"], fruits["label_idx"], image_size=image_size)
     return ds
 
@@ -97,7 +97,7 @@ def evaluate_student_split(
     seed: int = 42,
     model: Optional[VisionStudent] = None,
 ) -> Dict:
-    """Chấm điểm mô hình VisionStudent trên tập `valid` hoặc `test` chỉ với ảnh RGB."""
+    """Evaluate VisionStudent on `valid` or `test` split using RGB images only."""
     ckpt_path = resolve_path(ckpt_path)
     output_dir = resolve_path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -142,7 +142,7 @@ def generate_benchmark_comparison(
     student_results_dir: Union[str, Path],
     project_root: Path = PROJECT_ROOT,
 ) -> Optional[pd.DataFrame]:
-    """Tạo bảng đối sánh toàn diện giữa Student, Teacher và 3 Unimodal Baselines."""
+    """Generate comprehensive comparison table across Student, Teacher, and 3 Unimodal Baselines."""
     student_results_dir = resolve_path(student_results_dir)
     rows = []
 
@@ -229,9 +229,9 @@ def generate_benchmark_comparison(
     df.to_csv(student_results_dir / "benchmark_comparison.csv", index=False)
 
     md_lines = [
-        "# Bảng đối sánh hiệu năng CMKD (Test Set)",
+        "# CMKD Performance Benchmark Comparison (Test Set)",
         "",
-        "| Mô hình | Đầu vào khi Test | Sample Acc | Sample Macro-F1 | Fruit Acc | Fruit Macro-F1 |",
+        "| Model | Test Input | Sample Acc | Sample Macro-F1 | Fruit Acc | Fruit Macro-F1 |",
         "| :--- | :--- | :---: | :---: | :---: | :---: |",
     ]
     for r in rows:
@@ -247,7 +247,7 @@ def generate_benchmark_comparison(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Đánh giá độc lập mô hình Vision-Only Student (Giai đoạn 2)")
+    p = argparse.ArgumentParser(description="Independent evaluation of Vision-Only Student model (Stage 2)")
     p.add_argument("--checkpoint", default="checkpoints/studentmodal/best_student.pth")
     p.add_argument("--manifest", default="data/final/final_multimodal_manifest.csv")
     p.add_argument("--data-dir", default="data/final")

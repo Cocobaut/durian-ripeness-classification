@@ -1,32 +1,32 @@
-"""Module tiền xử lý âm thanh gõ quả sầu riêng cho nhánh âm học (Audio Modality).
+"""Durian knock audio preprocessing module for the Acoustic Modality.
 
-Phụ trách: Member 2 (Nhánh Âm thanh)
+Responsible: Member 2 (Audio Track)
 
-Module chỉ gồm một class duy nhất `AudioPreprocessor`, gom toàn bộ các bước đã được
-kiểm chứng trong notebook `01_eda_and_preprocess_audio.ipynb`:
-- Đọc file `.wav` (Android, PCM 48 kHz stereo) và `.m4a` (iPhone, ALAC 48 kHz mono) bằng ffmpeg,
-  đưa về mono và resample về `target_sr`. Cả hai thiết bị đi qua cùng một bộ giải mã/resample
-  để không tạo ra khác biệt nhân tạo giữa thiết bị.
-- Lọc nhiễu tần thấp (high-pass) và chuẩn hóa biên độ đỉnh trước khi dò tiếng gõ.
-- Mỗi file dài khoảng 30 giây và chứa khoảng 30 tiếng gõ. Thay vì cắt khoảng lặng rồi
-  pad/truncate cả file, class dò onset của từng tiếng gõ (loại tiếng gõ quá yếu và tiếng gõ
-  bị cụt ở biên file), cắt mỗi tiếng gõ thành một đoạn dài cố định và ghép K tiếng gõ thành một mẫu.
-- Mel-Spectrogram, chuyển sang log-dB rồi chuẩn hóa từng mẫu (mean 0, std 1). Bước này loại bỏ
-  chênh lệch độ lớn giữa hai thiết bị và giữa các lần gõ mạnh, nhẹ.
-- SpecAugment (Time Masking + Frequency Masking), chỉ dùng khi train.
-- Đọc nhãn từ tên file và lập bảng chỉ mục có gắn cờ nhãn nghi sai (`label_suspect`); việc lọc
-  được quyết định ở bước tạo MultimodalDataset. Class không tự lọc file nào.
+This module defines a single class `AudioPreprocessor`, consolidating all steps
+validated in `01_eda_and_preprocess_audio.ipynb`:
+- Decode `.wav` (Android, PCM 48 kHz stereo) and `.m4a` (iPhone, ALAC 48 kHz mono) via ffmpeg,
+  downmix to mono, and resample to `target_sr`. Both devices pass through the exact same
+  decoder/resampler to avoid introducing artificial device differences.
+- Apply high-pass filtering and peak amplitude normalization prior to knock detection.
+- Each recording is ~30 s long and contains ~30 knocks. Rather than trimming silence and
+  padding/truncating the entire file, this class detects each knock onset (filtering out weak
+  knocks and boundary-truncated knocks), slices fixed-length segments, and concatenates K knocks.
+- Compute Mel-Spectrogram, convert to log-dB, and normalize per sample (zero mean, unit std).
+  This removes loudness differences between devices and across stronger/lighter knocks.
+- Apply SpecAugment (Time Masking + Frequency Masking) during training only.
+- Parse labels from filenames and build an index table flagging suspected labels (`label_suspect`);
+  filtering is deferred to MultimodalDataset creation. This class never discards files itself.
 
-Ví dụ sử dụng:
+Usage example:
     preprocessor = AudioPreprocessor(random_state=42)
     mel = preprocessor.process("durian_002_unripe_iphone.m4a", train=True)   # torch.float32 [1, 64, 306]
     fruit_id, label, device = AudioPreprocessor.parse_filename("durian_002_unripe_iphone.m4a")
 
-    # Bảng chỉ mục toàn bộ file kèm cờ nhãn nghi sai, sau đó lấy danh sách file sạch
+    # Build full file index with suspect-label flags, then retrieve clean file list
     index = preprocessor.build_file_index("data/split_data")
     train_files = AudioPreprocessor.get_clean_files(index, split="train")
 
-    # Dùng cache khi một file được đọc nhiều lần (nhiều epoch)
+    # Enable caching when a file is read repeatedly across epochs
     preprocessor = AudioPreprocessor(cache=True, random_state=42)
 """
 
@@ -49,15 +49,15 @@ import torch
 
 
 class AudioPreprocessor:
-    """Bộ tiền xử lý âm thanh gõ quả sầu riêng thành Mel-Spectrogram cố định kích thước.
+    """Preprocessor converting durian knock audio into fixed-size Mel-Spectrograms.
 
-    Class cung cấp:
-    - `process()`: đường dẫn file -> tensor float32 [1, n_mels, T] (train có augmentation).
+    Provides:
+    - `process()`: file path -> float32 tensor [1, n_mels, T] (with augmentation when train=True).
     - `load()`, `denoise()`, `detect_knocks()`, `load_knocks()`, `prepare_knocks()`,
-      `knocks_to_logmel()`, `normalize()`, `spec_augment()`: các bước con, dùng để trực quan hóa
-      hoặc để dựng pipeline khác (vd feature extractor của AST) trên cùng cách chọn tiếng gõ.
-    - `parse_filename()`: tên file -> (fruit_id, label, device).
-    - `build_file_index()` / `get_clean_files()`: bảng chỉ mục file kèm cờ nhãn nghi sai.
+      `knocks_to_logmel()`, `normalize()`, `spec_augment()`: sub-steps exposed for visualization
+      or building custom pipelines (e.g., AST feature extractor) with identical knock selection.
+    - `parse_filename()`: filename -> (fruit_id, label, device).
+    - `build_file_index()` / `get_clean_files()`: file index table with suspect-label flags.
     """
 
     LABELS = ("unripe", "ripe", "overripe")
@@ -66,7 +66,7 @@ class AudioPreprocessor:
     FILENAME_PATTERN = re.compile(
         r"^durian_(\d{3})_(unripe|ripe|overripe)_(android|iphone)\.(wav|m4a)$", re.IGNORECASE
     )
-    # Hậu tố nhãn trong tên file gốc của iPhone, vd "8-RI.m4a", "162-2-or.m4a"
+    # Ripeness suffix in original iPhone filenames, e.g., "8-RI.m4a", "162-2-or.m4a"
     IPHONE_SUFFIX_PATTERN = re.compile(r"-(un|ri|or)\.m4a$", re.IGNORECASE)
     SUFFIX_TO_LABEL = {"un": "unripe", "ri": "ripe", "or": "overripe"}
 
@@ -96,38 +96,38 @@ class AudioPreprocessor:
         random_state: Optional[int] = None,
         cache: bool = False,
     ):
-        """Khởi tạo bộ tiền xử lý.
+        """Initialize the audio preprocessor.
 
         Args:
-            target_sr: Tần số lấy mẫu sau resample (Hz). 16 kHz giữ được dải tới 8 kHz, bao trọn
-                gần như toàn bộ năng lượng tiếng gõ, và trùng với tần số AST được huấn luyện.
-            n_knocks: Số tiếng gõ K ghép thành một mẫu.
-            knock_duration: Độ dài mỗi đoạn tiếng gõ (giây), tính từ `pre_onset` trước đỉnh.
-            pre_onset: Lùi điểm bắt đầu đoạn cắt về trước đỉnh năng lượng (giây) để giữ trọn pha tấn công.
-            highpass_hz: Tần số cắt bộ lọc high-pass (loại tiếng ù, rung tay cầm máy); 0 để tắt.
-            min_knock_gap: Khoảng cách tối thiểu giữa hai tiếng gõ (giây) khi dò đỉnh.
-            knock_floor_db: Đỉnh phải cao hơn nền nhiễu ít nhất bấy nhiêu dB mới được tính là tiếng gõ.
-            knock_prominence_db: Độ nổi bật tối thiểu (dB) của đỉnh so với vùng lân cận.
-            knock_rel_db: Loại tiếng gõ yếu hơn trung vị mức đỉnh các tiếng gõ trong file quá bấy nhiêu dB.
-            n_fft: Số điểm FFT.
-            win_length: Độ dài cửa sổ STFT (mẫu), 400 mẫu = 25 ms ở 16 kHz.
-            hop_length: Bước nhảy STFT (mẫu), 160 mẫu = 10 ms ở 16 kHz.
-            n_mels: Số dải Mel.
-            fmin: Tần số thấp nhất của bộ lọc Mel (Hz).
-            fmax: Tần số cao nhất của bộ lọc Mel (Hz), mặc định bằng target_sr / 2.
-            top_db: Ngưỡng cắt động của log-dB so với giá trị lớn nhất.
-            time_shift: Biên độ dịch ngẫu nhiên điểm bắt đầu mỗi tiếng gõ khi train (giây).
-            freq_mask_param: Độ rộng tối đa của mỗi dải che tần số (số dải Mel).
-            time_mask_param: Độ rộng tối đa của mỗi dải che thời gian (số khung).
-            num_freq_masks: Số dải che tần số.
-            num_time_masks: Số dải che thời gian.
-            random_state: Seed cho bộ sinh số ngẫu nhiên nội bộ (chọn tiếng gõ, dịch, SpecAugment).
-            cache: Lưu các đoạn tiếng gõ đã cắt của từng file trong bộ nhớ để các epoch sau không phải giải mã lại.
+            target_sr: Resampled sample rate (Hz). 16 kHz preserves frequencies up to 8 kHz, capturing
+                virtually all knock energy and matching AST's pretraining sample rate.
+            n_knocks: Number of knock segments K concatenated into a single sample.
+            knock_duration: Duration of each knock segment (seconds), starting `pre_onset` before peak.
+            pre_onset: Lead time before energy peak (seconds) to preserve the full attack transient.
+            highpass_hz: High-pass cutoff frequency (removes hum and handling noise); 0 disables filtering.
+            min_knock_gap: Minimum spacing between two detected knocks (seconds).
+            knock_floor_db: Minimum dB above noise floor required for a valid knock peak.
+            knock_prominence_db: Minimum peak prominence (dB) relative to local neighborhood.
+            knock_rel_db: Reject knocks weaker than the file's median peak level by more than this dB.
+            n_fft: FFT size.
+            win_length: STFT window length (samples); 400 samples = 25 ms at 16 kHz.
+            hop_length: STFT hop length (samples); 160 samples = 10 ms at 16 kHz.
+            n_mels: Number of Mel filterbank bins.
+            fmin: Lowest Mel filterbank frequency (Hz).
+            fmax: Highest Mel filterbank frequency (Hz); defaults to target_sr / 2.
+            top_db: Dynamic range cutoff for log-dB relative to peak.
+            time_shift: Random start-time jitter amplitude per knock during training (seconds).
+            freq_mask_param: Maximum width of each frequency mask (Mel bins).
+            time_mask_param: Maximum width of each time mask (frames).
+            num_freq_masks: Number of frequency masks.
+            num_time_masks: Number of time masks.
+            random_state: Seed for internal RNG (knock sampling, jitter, SpecAugment).
+            cache: Cache extracted knock segments per file in RAM across epochs.
         """
         if shutil.which("ffmpeg") is None:
-            raise RuntimeError("Không tìm thấy ffmpeg. Cài bằng `brew install ffmpeg` (macOS) hoặc `apt install ffmpeg`.")
+            raise RuntimeError("ffmpeg not found. Install via `brew install ffmpeg` (macOS) or `apt install ffmpeg`.")
         if n_knocks < 1:
-            raise ValueError(f"n_knocks phải >= 1, nhận được: {n_knocks}")
+            raise ValueError(f"n_knocks must be >= 1, got: {n_knocks}")
 
         self.target_sr = target_sr
         self.n_knocks = n_knocks
@@ -157,47 +157,47 @@ class AudioPreprocessor:
         self.rng = np.random.default_rng(random_state)
         self.cache = cache
         self._cache: Dict[str, np.ndarray] = {}
-        self.short_files: Dict[str, int] = {}  # Các file dò được ít hơn K tiếng gõ -> số tiếng gõ thực tế
+        self.short_files: Dict[str, int] = {}  # Files with fewer than K detected knocks -> actual count
 
     @property
     def output_shape(self) -> Tuple[int, int, int]:
-        """Shape cố định của tensor đầu ra `process()`: (1, n_mels, K * frames_per_knock)."""
+        """Fixed output tensor shape from `process()`: (1, n_mels, K * frames_per_knock)."""
         return 1, self.n_mels, self.n_knocks * self.frames_per_knock
 
     def reseed(self, seed: int) -> None:
-        """Đặt lại seed. Gọi trong `worker_init_fn` khi DataLoader có nhiều worker,
-        nếu không các worker sẽ sinh ra cùng một chuỗi augmentation."""
+        """Reset RNG seed. Call inside `worker_init_fn` for multi-worker DataLoaders
+        so workers do not generate identical augmentation sequences."""
         self.rng = np.random.default_rng(seed)
 
     # ------------------------------------------------------------------
-    # Đọc và làm sạch tín hiệu
+    # Signal loading and denoising
     # ------------------------------------------------------------------
     def load(self, path: str, sr: Optional[int] = None, mono: bool = True) -> np.ndarray:
-        """Đọc file âm thanh ở tần số `sr` (mặc định `target_sr`), kiểu float32.
+        """Decode audio file at `sr` Hz (default `target_sr`) as float32.
 
-        Dùng ffmpeg vì libsndfile (soundfile/librosa) không đọc được ALAC trong file .m4a của iPhone.
-        ffmpeg chỉ giải mã và resample; việc trộn về mono là lấy trung bình các kênh (bộ trộn mặc định
-        của ffmpeg nhân 0.707 cho mỗi kênh nên biên độ có thể vượt 1).
+        Uses ffmpeg because libsndfile (soundfile/librosa) cannot decode ALAC in iPhone .m4a files.
+        ffmpeg decodes and resamples; mono downmix averages channels (ffmpeg's default mixer
+        scales by 0.707 per channel, which can cause amplitudes > 1).
 
         Returns:
-            Mảng [n_samples] nếu `mono=True`, ngược lại [n_samples, n_channels].
+            Array of shape [n_samples] if `mono=True`, otherwise [n_samples, n_channels].
         """
         if not os.path.exists(path):
-            raise FileNotFoundError(f"Không tìm thấy file âm thanh: {path}")
+            raise FileNotFoundError(f"Audio file not found: {path}")
         cmd = ["ffmpeg", "-v", "error", "-nostdin", "-i", path, "-ar", str(sr or self.target_sr),
                "-c:a", "pcm_f32le", "-f", "wav", "-"]
         result = subprocess.run(cmd, capture_output=True)
         if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg không giải mã được {path}: {result.stderr.decode(errors='ignore').strip()}")
+            raise RuntimeError(f"ffmpeg failed to decode {path}: {result.stderr.decode(errors='ignore').strip()}")
         y, _ = sf.read(io.BytesIO(result.stdout), dtype="float32", always_2d=True)
         if y.size == 0:
-            raise RuntimeError(f"File âm thanh rỗng: {path}")
+            raise RuntimeError(f"Empty audio file: {path}")
         return y.mean(axis=1) if mono else y
 
     def denoise(self, y: np.ndarray, sr: Optional[int] = None) -> np.ndarray:
-        """Lọc high-pass Butterworth bậc 4 rồi chuẩn hóa biên độ đỉnh về 1.
+        """Apply 4th-order Butterworth high-pass filter and peak-normalize to 1.
 
-        Chuẩn hóa đỉnh giúp ngưỡng dò tiếng gõ (tính theo dB so với đỉnh) ổn định giữa iPhone và Android.
+        Peak normalization keeps dB knock-detection thresholds consistent across iPhone and Android.
         """
         sr = sr or self.target_sr
         if self.highpass_hz > 0:
@@ -206,10 +206,10 @@ class AudioPreprocessor:
         return (y / (np.abs(y).max() + 1e-9)).astype(np.float32)
 
     def frame_energy_db(self, y: np.ndarray) -> Tuple[np.ndarray, int]:
-        """Năng lượng RMS theo khung 20 ms, bước 10 ms, đơn vị dB so với khung lớn nhất.
+        """Compute RMS energy in 20 ms frames (10 ms hop) in dB relative to maximum frame.
 
         Returns:
-            Tuple (mảng dB theo khung, bước nhảy tính bằng mẫu).
+            Tuple (per-frame dB array, hop size in samples).
         """
         frame, hop = int(0.02 * self.target_sr), int(0.01 * self.target_sr)
         if len(y) < frame:
@@ -218,18 +218,18 @@ class AudioPreprocessor:
         return 20 * np.log10(rms / rms.max()), hop
 
     def detect_knocks(self, y: np.ndarray, drop_edges: bool = True) -> np.ndarray:
-        """Dò vị trí các tiếng gõ trên tín hiệu đã `denoise`.
+        """Detect knock positions on a denoised signal.
 
-        Tiếng gõ là đỉnh của đường năng lượng dB thỏa mãn đồng thời:
-        - cao hơn nền nhiễu (phân vị 20%) ít nhất `knock_floor_db`, nổi bật ít nhất
-          `knock_prominence_db` và cách đỉnh trước ít nhất `min_knock_gap` giây;
-        - không yếu hơn trung vị mức đỉnh của các tiếng gõ trong file quá `knock_rel_db`
-          (loại tiếng gõ hụt, tiếng chạm nhẹ hoặc tiếng động nền);
-        - nếu `drop_edges=True`: cửa sổ cắt (kể cả phần dư để dịch thời gian) nằm trọn trong file,
-          tránh tiếng gõ bị cụt ở đầu hoặc cuối bản ghi.
+        A knock is a peak in the dB energy curve that simultaneously satisfies:
+        - higher than the noise floor (20th percentile) by at least `knock_floor_db`, prominent by at
+          least `knock_prominence_db`, and separated from the previous peak by at least `min_knock_gap` s;
+        - not weaker than the file's median knock peak level by more than `knock_rel_db`
+          (rejects missed knocks, light touches, or background thuds);
+        - if `drop_edges=True`: the slice window (including time-shift padding) fits strictly inside
+          the recording, avoiding truncated knocks at file boundaries.
 
         Returns:
-            Mảng chỉ số mẫu (sample index) tại đỉnh năng lượng của từng tiếng gõ.
+            Array of sample indices at the energy peak of each detected knock.
         """
         db, hop = self.frame_energy_db(y)
         noise_floor = np.percentile(db, 20)
@@ -241,19 +241,19 @@ class AudioPreprocessor:
         )
         if len(peaks):
             peaks = peaks[props["peak_heights"] >= np.median(props["peak_heights"]) - self.knock_rel_db]
-        samples = peaks * hop + int(0.01 * self.target_sr)  # Tâm khung 20 ms
+        samples = peaks * hop + int(0.01 * self.target_sr)  # Center of 20 ms frame
         if drop_edges:
             start = samples - int(round(self.pre_onset * self.target_sr)) - self.shift_samples
             inside = (start >= 0) & (start + self.knock_samples + 2 * self.shift_samples <= len(y))
-            if inside.any():  # Nếu mọi tiếng gõ đều chạm biên thì giữ nguyên và để extract_knocks pad 0
+            if inside.any():  # If all knocks hit boundaries, keep all and let extract_knocks zero-pad
                 samples = samples[inside]
         return samples
 
     def extract_knocks(self, y: np.ndarray, peaks: np.ndarray) -> np.ndarray:
-        """Cắt mỗi tiếng gõ thành đoạn dài `knock_samples + 2 * shift_samples`, pad 0 nếu chạm biên.
+        """Slice each knock into length `knock_samples + 2 * shift_samples`, zero-padding boundaries.
 
-        Phần dư `shift_samples` ở hai đầu để `prepare_knocks()` dịch ngẫu nhiên khi train
-        mà không cần đọc lại file.
+        Extra `shift_samples` margins allow `prepare_knocks()` to apply random time shifts during
+        training without re-decoding the file.
         """
         seg_len = self.knock_samples + 2 * self.shift_samples
         pre = int(round(self.pre_onset * self.target_sr)) + self.shift_samples
@@ -264,37 +264,37 @@ class AudioPreprocessor:
         return np.stack([padded[s: s + seg_len] for s in starts]).astype(np.float32)
 
     def load_knocks(self, path: str) -> np.ndarray:
-        """Đọc file, lọc nhiễu, dò và cắt toàn bộ tiếng gõ. Trả về mảng [N, seg_len].
+        """Load file, denoise, detect and slice all knocks. Returns array [N, seg_len].
 
-        Nếu không dò được tiếng gõ nào, lấy đoạn quanh mẫu có biên độ lớn nhất làm một tiếng gõ.
+        If no knocks are detected, falls back to a segment centered at the peak amplitude sample.
         """
         if self.cache and path in self._cache:
             return self._cache[path]
         y = self.denoise(self.load(path))
         peaks = self.detect_knocks(y)
         if len(peaks) == 0:
-            warnings.warn(f"Không dò được tiếng gõ nào trong {os.path.basename(path)}, dùng đoạn có biên độ lớn nhất.")
+            warnings.warn(f"No knocks detected in {os.path.basename(path)}; using segment around peak amplitude.")
             peaks = np.array([int(np.argmax(np.abs(y)))])
         knocks = self.extract_knocks(y, peaks)
         if len(knocks) < self.n_knocks:
             self.short_files[path] = len(knocks)
             warnings.warn(
-                f"{os.path.basename(path)} chỉ có {len(knocks)} tiếng gõ (< K={self.n_knocks}), sẽ lặp lại tiếng gõ có sẵn."
+                f"{os.path.basename(path)} has only {len(knocks)} knocks (< K={self.n_knocks}); cycling available knocks."
             )
         if self.cache:
             self._cache[path] = knocks
         return knocks
 
     # ------------------------------------------------------------------
-    # Chọn tiếng gõ và trích xuất Mel-Spectrogram
+    # Knock selection and Mel-Spectrogram extraction
     # ------------------------------------------------------------------
     def select_knock_indices(self, n_available: int, train: bool = False,
                              rng: Optional[np.random.Generator] = None) -> np.ndarray:
-        """Chọn K chỉ số tiếng gõ.
+        """Select K knock indices.
 
-        - Train: chọn ngẫu nhiên K tiếng gõ không lặp (giữ thứ tự thời gian).
-        - Val/test: lấy K tiếng gõ cách đều nhau trên toàn file, kết quả tất định.
-        - Nếu file có ít hơn K tiếng gõ: lặp vòng các tiếng gõ có sẵn.
+        - Train: sample K distinct knocks randomly (preserving chronological order).
+        - Val/Test: select K evenly spaced knocks across the file (deterministic).
+        - If fewer than K knocks exist: cycle through available knocks.
         """
         k = self.n_knocks
         if n_available < k:
@@ -306,7 +306,7 @@ class AudioPreprocessor:
 
     def prepare_knocks(self, knocks: np.ndarray, train: bool = False,
                        rng: Optional[np.random.Generator] = None) -> np.ndarray:
-        """Chọn K tiếng gõ và cắt về đúng `knock_samples` (train: dịch ngẫu nhiên ±time_shift). Trả về [K, knock_samples]."""
+        """Select K knocks and crop to `knock_samples` (train: random ±time_shift). Returns [K, knock_samples]."""
         rng = rng or self.rng
         idx = self.select_knock_indices(len(knocks), train=train, rng=rng)
         if train and self.shift_samples > 0:
@@ -316,7 +316,7 @@ class AudioPreprocessor:
         return np.stack([knocks[i, o: o + self.knock_samples] for i, o in zip(idx, offsets)])
 
     def knocks_to_logmel(self, knocks: np.ndarray) -> np.ndarray:
-        """Tính log-Mel (dB) cho từng tiếng gõ [K, L] rồi ghép theo trục thời gian thành [n_mels, K * frames_per_knock]."""
+        """Compute log-Mel (dB) per knock [K, L] and concatenate along time axis to [n_mels, K * frames_per_knock]."""
         mel = librosa.feature.melspectrogram(
             y=knocks, sr=self.target_sr, n_fft=self.n_fft, win_length=self.win_length,
             hop_length=self.hop_length, n_mels=self.n_mels, fmin=self.fmin, fmax=self.fmax, power=2.0,
@@ -326,17 +326,17 @@ class AudioPreprocessor:
 
     @staticmethod
     def normalize(log_mel: np.ndarray) -> np.ndarray:
-        """Chuẩn hóa từng mẫu về mean 0, std 1."""
+        """Normalize each sample to zero mean and unit standard deviation."""
         return ((log_mel - log_mel.mean()) / (log_mel.std() + 1e-6)).astype(np.float32)
 
     def spec_augment(self, mel: torch.Tensor, rng: Optional[np.random.Generator] = None) -> torch.Tensor:
-        """SpecAugment: che ngẫu nhiên `num_freq_masks` dải tần và `num_time_masks` dải thời gian.
+        """SpecAugment: randomly mask `num_freq_masks` frequency bands and `num_time_masks` time intervals.
 
-        Giá trị che là 0, tức giá trị trung bình sau khi chuẩn hóa. Chỉ dùng khi train.
+        Mask fill value is 0 (the post-normalization mean). Used during training only.
 
         Args:
             mel: Tensor [..., n_mels, T].
-            rng: Bộ sinh số ngẫu nhiên, mặc định dùng `self.rng`.
+            rng: Optional RNG; defaults to `self.rng`.
         """
         rng = rng or self.rng
         mel = mel.clone()
@@ -353,7 +353,7 @@ class AudioPreprocessor:
 
     def process_knocks(self, knocks: np.ndarray, train: bool = False,
                        rng: Optional[np.random.Generator] = None) -> torch.Tensor:
-        """Từ mảng tiếng gõ của `load_knocks()` -> tensor float32 [1, n_mels, T]."""
+        """Convert pre-extracted knocks from `load_knocks()` -> float32 tensor [1, n_mels, T]."""
         log_mel = self.normalize(self.knocks_to_logmel(self.prepare_knocks(knocks, train=train, rng=rng)))
         mel = torch.from_numpy(log_mel).unsqueeze(0)
         if train:
@@ -362,31 +362,32 @@ class AudioPreprocessor:
         return mel
 
     def process(self, path: str, train: bool = False, rng: Optional[np.random.Generator] = None) -> torch.Tensor:
-        """Tiền xử lý trọn gói một file âm thanh thành tensor float32 [1, n_mels, T].
+        """End-to-end preprocessing of an audio file into a float32 tensor [1, n_mels, T].
 
         Args:
-            path: Đường dẫn file .wav hoặc .m4a.
-            train: True để chọn tiếng gõ ngẫu nhiên, dịch thời gian và áp dụng SpecAugment.
-            rng: Bộ sinh số ngẫu nhiên riêng (tùy chọn), mặc định dùng `self.rng`.
+            path: Path to .wav or .m4a file.
+            train: If True, randomly sample knocks, apply time shift, and apply SpecAugment.
+            rng: Optional RNG; defaults to `self.rng`.
         """
         return self.process_knocks(self.load_knocks(path), train=train, rng=rng)
 
     # ------------------------------------------------------------------
-    # Tên file, bảng chỉ mục và kiểm tra nhãn
+    # Filename parsing, file indexing, and label verification
     # ------------------------------------------------------------------
     @classmethod
     def parse_filename(cls, path: str) -> Tuple[int, str, str]:
-        """Trích xuất (fruit_id, label, device) từ tên file dạng `durian_<id>_<label>_<device>.<ext>`.
+        """Extract (fruit_id, label, device) from filename `durian_<id>_<label>_<device>.<ext>`.
 
-        Nhãn là trạng thái độ chín tại thời điểm gõ, có thể khác cột Ripeness của quả trong CSV.
+        Note: the filename label reflects ripeness at knock recording time, which may differ from
+        the fruit's Ripeness column in the CSV.
         """
         m = cls.FILENAME_PATTERN.match(os.path.basename(path))
         if m is None:
-            raise ValueError(f"Tên file không đúng định dạng durian_<id>_<label>_<device>.<ext>: {path}")
+            raise ValueError(f"Filename does not match durian_<id>_<label>_<device>.<ext>: {path}")
         return int(m.group(1)), m.group(2).lower(), m.group(3).lower()
 
     def onset_envelope(self, path: str) -> np.ndarray:
-        """Đường onset strength (bước 20 ms) đã chuẩn hóa z-score, dùng để so khớp nhịp gõ giữa hai file."""
+        """Z-score normalized onset strength envelope (20 ms hop) for cross-recording matching."""
         y = self.load(path)
         env = librosa.onset.onset_strength(y=y / (np.abs(y).max() + 1e-9), sr=self.target_sr,
                                            hop_length=int(0.02 * self.target_sr))
@@ -394,10 +395,11 @@ class AudioPreprocessor:
 
     @staticmethod
     def envelope_xcorr(a: np.ndarray, b: np.ndarray, max_lag: int = 1000) -> float:
-        """Tương quan chéo lớn nhất giữa hai onset envelope, xét độ trễ tối đa `max_lag` khung (20 s).
+        """Maximum cross-correlation between two onset envelopes up to `max_lag` frames (20 s).
 
-        Chỉ xét các độ trễ mà đoạn chồng lấn dài ít nhất một nửa file ngắn hơn. Hai file ghi
-        cùng một phiên gõ (vd iPhone và Android ghi đồng thời) cho giá trị gần 1, khác phiên thì dưới 0.5.
+        Considers only lags where overlap is at least half the shorter file. Recordings from the
+        same knocking session (e.g., iPhone and Android recorded simultaneously) approach 1.0,
+        whereas separate sessions are below 0.5.
         """
         corr = sps.correlate(a, b, mode="full", method="fft")
         lags = sps.correlation_lags(len(a), len(b), mode="full")
@@ -415,31 +417,31 @@ class AudioPreprocessor:
         tz_offset_hours: float = 8.0,
         n_jobs: int = 8,
     ) -> pd.DataFrame:
-        """Lập bảng chỉ mục toàn bộ file âm thanh và gắn cờ nhãn nghi sai. Không xóa hay di chuyển file.
+        """Build an index of all audio files and flag suspect labels without deleting or moving files.
 
-        Quy trình:
-        1. Đọc nhãn/thiết bị từ tên file; tính md5 để phát hiện bản sao y hệt (mọi thiết bị).
-        2. Đối chiếu `metadata.csv` theo kích thước file để biết tên gốc và thời điểm ghi thực sự.
-           `iphone_date` là giờ UTC (tag creation_time của Voice Memos), `android_date` là giờ địa phương,
-           nên giờ iPhone được cộng `tz_offset_hours` trước khi so sánh.
-        3. So khớp nội dung: tương quan onset envelope giữa mọi cặp file của cùng một quả;
-           các file có tương quan >= `session_threshold` được gộp thành một phiên ghi.
-        4. Nhãn iPhone được tin cậy (kiểm tra thêm hậu tố -UN/-RI/-OR của tên gốc). Nhãn của phiên
-           lấy theo file iPhone trong phiên; file Android nhận nhãn của phiên chứa nó.
-        5. File Android không khớp phiên nào nhưng ghi cùng ngày với file iPhone cùng nhãn được coi là sạch
-           (lần gõ khác trong cùng ngày, độ chín không đổi). Các trường hợp còn lại bị gắn cờ.
+        Workflow:
+        1. Parse label/device from filename; compute md5 to detect exact duplicates across devices.
+        2. Match `metadata.csv` by file size to recover original names and recording timestamps.
+           `iphone_date` is UTC (Voice Memos creation_time tag), while `android_date` is local time,
+           so `tz_offset_hours` is added to iPhone timestamps before comparison.
+        3. Content matching: compute onset-envelope correlation across all file pairs of each fruit;
+           pairs with correlation >= `session_threshold` are grouped into one recording session.
+        4. iPhone labels are trusted (further verified against -UN/-RI/-OR suffix in original name).
+           Session label is inherited from the iPhone file; Android files receive their session's label.
+        5. Android files not matching any session but recorded on the same day as an iPhone file with
+           the same label are considered clean (different session on same day). Remaining cases are flagged.
 
         Args:
-            data_root: Thư mục `data/split_data`.
-            splits: Các tập cần quét.
-            sound_dirname: Tên thư mục âm thanh trong mỗi split.
-            session_threshold: Ngưỡng tương quan để coi hai file cùng phiên ghi.
-            same_day_hours: Độ lệch thời gian tối đa (giờ) để coi là ghi cùng ngày.
-            tz_offset_hours: Độ lệch múi giờ của Android so với UTC.
-            n_jobs: Số luồng đọc file song song.
+            data_root: Path to `data/split_data`.
+            splits: Splits to scan.
+            sound_dirname: Audio directory name inside each split.
+            session_threshold: Correlation threshold to consider two recordings from the same session.
+            same_day_hours: Maximum time delta (hours) to count as same-day recording.
+            tz_offset_hours: Android local timezone offset relative to UTC.
+            n_jobs: Number of worker threads for reading files.
 
         Returns:
-            DataFrame, mỗi dòng một file, gồm các cột chính: file, path, split, fruit_id, label, device,
+            DataFrame with one row per file and columns: file, path, split, fruit_id, label, device,
             label_corrected, label_suspect, reason, is_duplicate, duplicate_of, session_id,
             xcorr_pair, gap_hours, original_name, md5, fruit_ripeness, matches_fruit_ripeness.
         """
@@ -447,7 +449,7 @@ class AudioPreprocessor:
         for split in splits:
             folder = os.path.join(data_root, split, sound_dirname)
             if not os.path.isdir(folder):
-                warnings.warn(f"Không tìm thấy thư mục {folder}, bỏ qua.")
+                warnings.warn(f"Directory {folder} not found; skipping.")
                 continue
             for name in sorted(os.listdir(folder)):
                 if not self.FILENAME_PATTERN.match(name):
@@ -458,24 +460,24 @@ class AudioPreprocessor:
                              "label": label, "device": device, "size_bytes": os.path.getsize(path)})
         df = pd.DataFrame(rows)
         if df.empty:
-            raise FileNotFoundError(f"Không tìm thấy file âm thanh hợp lệ trong {data_root}")
+            raise FileNotFoundError(f"No valid audio files found in {data_root}")
 
-        # 1. md5 trên toàn bộ file (iPhone-iPhone, Android-Android và iPhone-Android)
+        # 1. md5 across all files (iPhone-iPhone, Android-Android, and iPhone-Android)
         with ThreadPoolExecutor(n_jobs) as ex:
             df["md5"] = list(ex.map(self._md5, df["path"]))
 
-        # 2. Đối chiếu metadata.csv
+        # 2. Match against metadata.csv
         df = self._attach_metadata(df, data_root, splits, sound_dirname, tz_offset_hours)
 
-        # 3. So khớp nội dung giữa mọi cặp file của cùng một quả
+        # 3. Content matching across all file pairs of each fruit
         with ThreadPoolExecutor(n_jobs) as ex:
             envelopes = dict(zip(df["path"], ex.map(self.onset_envelope, df["path"])))
         df["session_id"], df["xcorr_pair"] = self._assign_sessions(df, envelopes, session_threshold)
 
-        # 4-5. Suy ra nhãn đúng và gắn cờ
+        # 4-5. Infer corrected labels and assign flags
         df = self._resolve_labels(df, same_day_hours)
 
-        # Bản sao: giữ một file đại diện cho mỗi nhóm md5 (ưu tiên file có nhãn đúng)
+        # Duplicates: keep one representative file per md5 group (preferring files with correct labels)
         df["is_duplicate"] = False
         df["duplicate_of"] = ""
         for _, group in df.groupby("md5"):
@@ -486,7 +488,7 @@ class AudioPreprocessor:
             for idx in group.index.drop(keep):
                 df.loc[idx, ["is_duplicate", "duplicate_of"]] = [True, df.loc[keep, "file"]]
 
-        # Nhãn của quả trong sample_split_mapping.csv (phục vụ ghép đa phương thức theo fruit_id)
+        # Fruit ripeness label in sample_split_mapping.csv (for multimodal pairing by fruit_id)
         mapping_path = os.path.join(data_root, "sample_split_mapping.csv")
         if os.path.exists(mapping_path):
             mapping = pd.read_csv(mapping_path)
@@ -504,16 +506,16 @@ class AudioPreprocessor:
     @staticmethod
     def get_clean_files(index: pd.DataFrame, split: Optional[str] = None,
                         use_corrected: bool = False) -> pd.DataFrame:
-        """Lọc danh sách file sạch từ bảng `build_file_index()`.
+        """Filter clean files from the `build_file_index()` table.
 
         Args:
-            index: Bảng chỉ mục.
-            split: Tên tập cần lấy; None để lấy toàn bộ.
-            use_corrected: False chỉ lấy file không bị gắn cờ. True lấy thêm các file bị gắn cờ nhưng
-                đã biết nhãn đúng (`label_corrected`) và không phải bản sao.
+            index: File index DataFrame.
+            split: Split name to filter; None returns all splits.
+            use_corrected: If False, keeps only unflagged files. If True, also includes flagged
+                files whose corrected label (`label_corrected`) is known and that are not duplicates.
 
         Returns:
-            DataFrame đã lọc, có thêm cột `target` là nhãn dùng để huấn luyện (chuỗi) và `y` (chỉ số).
+            Filtered DataFrame with added `target` (string label) and `y` (integer class index) columns.
         """
         df = index if split is None else index[index["split"] == split]
         keep = ~df["label_suspect"]
@@ -531,12 +533,12 @@ class AudioPreprocessor:
 
     def _attach_metadata(self, df: pd.DataFrame, data_root: str, splits: Iterable[str], sound_dirname: str,
                          tz_offset_hours: float) -> pd.DataFrame:
-        """Tìm dòng metadata khớp kích thước file thật để lấy tên gốc và thời điểm ghi (giờ địa phương)."""
+        """Find matching metadata row by exact file size to recover original filename and local timestamp."""
         records = []
         for split in splits:
             meta_path = os.path.join(data_root, split, sound_dirname, "metadata.csv")
             if not os.path.exists(meta_path):
-                warnings.warn(f"Thiếu {meta_path}, không kiểm tra được thời điểm ghi của tập {split}.")
+                warnings.warn(f"Missing {meta_path}; cannot verify recording timestamps for split {split}.")
                 continue
             meta = pd.read_csv(meta_path)
             for device in self.DEVICES:
@@ -559,9 +561,9 @@ class AudioPreprocessor:
     @staticmethod
     def _assign_sessions(df: pd.DataFrame, envelopes: Dict[str, np.ndarray],
                          threshold: float) -> Tuple[List[str], List[float]]:
-        """Gộp các file cùng quả có nhịp gõ trùng nhau thành phiên ghi (thành phần liên thông).
+        """Group recordings of the same fruit with matching knock patterns into sessions (connected components).
 
-        Trả về mã phiên và tương quan lớn nhất của mỗi file với một file thiết bị kia trong cùng quả.
+        Returns session IDs and each file's maximum cross-correlation with an opposite-device file of the same fruit.
         """
         session = {}
         best_cross = {}
@@ -590,23 +592,23 @@ class AudioPreprocessor:
         return [session[p] for p in df["path"]], [round(best_cross.get(p, np.nan), 3) for p in df["path"]]
 
     def _resolve_labels(self, df: pd.DataFrame, same_day_hours: float) -> pd.DataFrame:
-        """Suy ra `label_corrected`, `label_suspect`, `reason` cho từng file."""
+        """Infer `label_corrected`, `label_suspect`, and `reason` for each file."""
         df = df.copy()
         df["label_corrected"] = df["label"]
         df["label_suspect"] = False
         df["reason"] = ""
         df["gap_hours"] = np.nan
 
-        # iPhone: kiểm tra hậu tố nhãn trong tên gốc
+        # iPhone: check label suffix in original filename
         for idx, row in df[df["device"] == "iphone"].iterrows():
             m = self.IPHONE_SUFFIX_PATTERN.search(str(row["original_name"]))
             if m and self.SUFFIX_TO_LABEL[m.group(1).lower()] != row["label"]:
                 df.loc[idx, ["label_corrected", "label_suspect", "reason"]] = [
                     self.SUFFIX_TO_LABEL[m.group(1).lower()], True,
-                    f"Tên gốc '{row['original_name']}' mang nhãn khác tên file",
+                    f"Original name '{row['original_name']}' has a different label than filename",
                 ]
 
-        # Nhãn của phiên = nhãn (đã sửa) của file iPhone trong phiên
+        # Session label = (corrected) label of the iPhone file in the session
         iphone = df[df["device"] == "iphone"]
         session_label = iphone.groupby("session_id")["label_corrected"].agg(
             lambda s: s.iloc[0] if s.nunique() == 1 else None)
@@ -618,22 +620,22 @@ class AudioPreprocessor:
                 df.loc[idx, "gap_hours"] = round(gap, 2) if pd.notna(gap) else np.nan
 
             sess_label = session_label.get(row["session_id"])
-            if sess_label is not None:  # Android khớp nội dung với một file iPhone
+            if sess_label is not None:  # Android content matches an iPhone file
                 if sess_label != row["label"]:
                     df.loc[idx, ["label_corrected", "label_suspect", "reason"]] = [
-                        sess_label, True, f"Nội dung trùng phiên ghi của file iPhone nhãn '{sess_label}'"]
-                # Kế thừa cờ nếu file iPhone cùng phiên bị sửa nhãn
+                        sess_label, True, f"Content matches recording session of iPhone file labeled '{sess_label}'"]
+                # Inherit flag if the paired iPhone file in the same session had its label corrected
                 ip_in_session = iphone[iphone["session_id"] == row["session_id"]]
                 if ip_in_session["label_suspect"].any() and not df.loc[idx, "label_suspect"]:
                     df.loc[idx, ["label_corrected", "label_suspect", "reason"]] = [
-                        sess_label, True, "Cùng phiên ghi với file iPhone bị sửa nhãn"]
+                        sess_label, True, "Same recording session as iPhone file with corrected label"]
                 continue
 
             gap = df.loc[idx, "gap_hours"]
             if pd.notna(gap) and abs(gap) < same_day_hours:
-                df.loc[idx, "reason"] = "Ghi chú: không trùng nội dung nhưng ghi cùng ngày với file iPhone cùng nhãn"
+                df.loc[idx, "reason"] = "Note: content does not match, but recorded on the same day as iPhone file with same label"
             else:
-                gap_txt = f"lệch {gap / 24:+.1f} ngày" if pd.notna(gap) else "không rõ thời điểm"
+                gap_txt = f"diff {gap / 24:+.1f} days" if pd.notna(gap) else "unknown timestamp"
                 df.loc[idx, ["label_corrected", "label_suspect", "reason"]] = [
-                    np.nan, True, f"Không trùng nội dung với file iPhone nào và ghi khác ngày ({gap_txt})"]
+                    np.nan, True, f"Content does not match any iPhone file and recorded on a different day ({gap_txt})"]
         return df

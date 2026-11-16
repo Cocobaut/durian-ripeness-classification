@@ -1,9 +1,9 @@
-"""Entrypoint ở thư mục gốc repo để huấn luyện mô hình Vision-Only Student (Giai đoạn 2 - CMKD).
+"""Repository root entrypoint to train the Vision-Only Student model (Stage 2 - CMKD).
 
-Chuyển tiếp toàn bộ đối số dòng lệnh sang module chính tại:
+Forwards all CLI arguments to the main module at:
 `workspaces/member1_vision_lead/04_train_teacher_and_student/train_student.py`
 
-Cách chạy (từ thư mục gốc repo):
+Usage (from the repository root):
     python train_student.py --smoke
     python train_student.py --epochs 30 --batch-size 16 --eval-test --device cuda
 """

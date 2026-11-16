@@ -1,8 +1,8 @@
-"""Backbone nhánh Âm thanh: ResNet-18 trên log-Mel [1, 64, 306] (f_audio in R^512).
+"""Audio modality backbone: ResNet-18 on log-Mel [1, 64, 306] (f_audio in R^512).
 
-Khớp `AudioResNet18.backbone` của Member 2
-(workspaces/member2_audio/02_train_unimodal_audio/train_audio.py), nạp được
-`audio_backbone_teacher.pth` (khóa `backbone_state_dict`) hoặc `best_audio_unimodal.pth`.
+Matches Member 2's `AudioResNet18.backbone`
+(workspaces/member2_audio/02_train_unimodal_audio/train_audio.py) and loads either
+`audio_backbone_teacher.pth` (`backbone_state_dict` key) or `best_audio_unimodal.pth`.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ import torch.nn as nn
 
 
 class AudioBackbone(nn.Module):
-    """ResNet-18 (timm, in_chans=1, num_classes=0) trả về vector đặc trưng [B, 512]."""
+    """ResNet-18 (timm, in_chans=1, num_classes=0) returning feature vectors [B, 512]."""
 
     def __init__(self, pretrained: bool = False, drop_rate: float = 0.0):
         super().__init__()
@@ -38,6 +38,6 @@ class AudioBackbone(nn.Module):
             state = ckpt
         missing, unexpected = self.backbone.load_state_dict(state, strict=False)
         if missing or unexpected:
-            raise RuntimeError(f"Audio ckpt không khớp: thiếu {missing[:5]}, thừa {unexpected[:5]}")
+            raise RuntimeError(f"Audio checkpoint mismatch: missing {missing[:5]}, unexpected {unexpected[:5]}")
         return self
 

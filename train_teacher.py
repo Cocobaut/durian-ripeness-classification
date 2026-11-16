@@ -1,9 +1,9 @@
-"""Entrypoint ở thư mục gốc repo để huấn luyện mô hình Multi-Modal Teacher.
+"""Repository root entrypoint to train the Multi-Modal Teacher model.
 
-Chuyển tiếp toàn bộ đối số dòng lệnh sang module chính tại:
+Forwards all CLI arguments to the main module at:
 `workspaces/member1_vision_lead/04_train_teacher_and_student/train_teacher.py`
 
-Cách chạy (từ thư mục gốc repo):
+Usage (from the repository root):
     python train_teacher.py --smoke
     python train_teacher.py --epochs 30 --warmup-epochs 5 --batch-size 8 --device cuda
 """

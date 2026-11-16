@@ -1,15 +1,15 @@
-"""Dataset & tiền xử lý nhánh Thị giác (RGB).
+"""Dataset & preprocessing for the Vision modality (RGB).
 
-Dự án: Phân loại độ chín sầu riêng bằng Chưng cất tri thức Đa phương thức (CMKD)
+Project: Durian Ripeness Classification via Cross-Modal Knowledge Distillation (CMKD)
 
-Transform giữ NGUYÊN như notebook huấn luyện unimodal vision
+Preserves the EXACT transforms from the unimodal vision training notebook
 (workspaces/member1_vision_lead/02_train_unimodal_vision/01_train_unimodal_vision_convnextv2_base.ipynb)
-để backbone ConvNeXt V2 nhận đúng phân phối dữ liệu đã học:
-CLAHE kênh L (LAB) -> 384x384 -> Normalize ImageNet.
+so the ConvNeXt V2 backbone receives the exact learned data distribution:
+CLAHE on L channel (LAB) -> 384x384 -> ImageNet Normalize.
 
-Dùng cho:
-- Teacher: thành phần con của MultimodalDataset (src/datasets/multimodal_dataset.py).
-- Student (Giai đoạn 2): ImageDataset dùng trực tiếp (Student chỉ nhận ảnh RGB).
+Used for:
+- Teacher: sub-component of MultimodalDataset (src/datasets/multimodal_dataset.py).
+- Student (Stage 2): ImageDataset used directly (Student takes RGB images only).
 """
 
 from __future__ import annotations
@@ -35,14 +35,14 @@ _FID_RE = re.compile(r"durian_?0*(\d+)", re.IGNORECASE)
 
 
 class CLAHETransform:
-    """CLAHE trên kênh L (không gian LAB) làm nổi kết cấu vi mô rãnh gai."""
+    """CLAHE on the L channel (LAB color space) to highlight micro-textures along spine grooves."""
 
     def __init__(self, clip_limit: float = 2.0, tile_grid_size: Tuple[int, int] = (8, 8)):
         self.clip_limit = clip_limit
         self.tile_grid_size = tile_grid_size
 
     def __call__(self, img: Image.Image) -> Image.Image:
-        # Tạo CLAHE trong __call__ để đối tượng pickle được (DataLoader nhiều worker trên Windows)
+        # Instantiate CLAHE inside __call__ so the transform object is picklable (multi-worker DataLoader on Windows)
         clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=self.tile_grid_size)
         lab = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2LAB)
         l, a, b = cv2.split(lab)
@@ -87,9 +87,9 @@ def camera_angle_from_name(name: str) -> str:
 
 
 def list_rgb_images(rgb_dir: Union[str, Path]) -> pd.DataFrame:
-    """Liệt kê ảnh RGB của một split: cột [path, file, fruit_id, camera_angle].
+    """List RGB images in a split: columns [path, file, fruit_id, camera_angle].
 
-    Tên file chuẩn của data/final: `{fruit_id}_{ANGLE}[_k]_{Ripeness}_rgb.jpg`.
+    Standard filename format in data/final: `{fruit_id}_{ANGLE}[_k]_{Ripeness}_rgb.jpg`.
     """
     rgb_dir = Path(rgb_dir)
     rows = []
@@ -111,18 +111,18 @@ def load_rgb(path: Union[str, Path]) -> Image.Image:
 
 
 class ImageDataset(Dataset):
-    """Dataset ảnh RGB đơn phương thức (dùng cho Student / Baseline Vision).
+    """Unimodal RGB image dataset (used for Student / Vision Baseline).
 
-    Mỗi phần tử: (image [3, H, W], label, fruit_id, {"camera_angle": ...}).
+    Each item: (image [3, H, W], label, fruit_id, {"camera_angle": ...}).
     """
 
     def __init__(self, records: pd.DataFrame, label_map: Dict[str, int],
                  transform: Optional[transforms.Compose] = None):
         """
         Args:
-            records: DataFrame từ `list_rgb_images` (cần cột path, fruit_id, camera_angle).
-            label_map: fruit_id -> label_idx (lấy từ final_multimodal_manifest.csv).
-            transform: transform ảnh (mặc định get_eval_transforms()).
+            records: DataFrame from `list_rgb_images` (requires path, fruit_id, camera_angle columns).
+            label_map: fruit_id -> label_idx (from final_multimodal_manifest.csv).
+            transform: image transform (defaults to get_eval_transforms()).
         """
         self.records = records[records["fruit_id"].isin(label_map)].reset_index(drop=True)
         self.label_map = label_map

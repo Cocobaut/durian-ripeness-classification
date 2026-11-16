@@ -1,25 +1,25 @@
-"""Dataset Đa phương thức (RGB + Knock Sound + Sensor) cho Multi-Modal Teacher.
+"""Multimodal Dataset (RGB + Knock Sound + Sensor) for the Multi-Modal Teacher.
 
-Dự án: Phân loại độ chín sầu riêng bằng Chưng cất tri thức Đa phương thức (CMKD)
-Tham chiếu đặc tả: Mục 1.3.1 - mỗi mẫu là tuple 5 thành phần `(img, audio, sensor, label, fruit_id)`.
+Project: Durian Ripeness Classification via Cross-Modal Knowledge Distillation (CMKD)
+Specification reference: Section 1.3.1 - each sample is a 5-tuple `(img, audio, sensor, label, fruit_id)`.
 
-Hợp thành (composition) từ 3 dataset con:
-- image_dataset.py  : transform ảnh (CLAHE, 384x384, ImageNet norm) giống nhánh vision unimodal.
-- audio_dataset.py  : AudioPreprocessor của Member 2 -> log-Mel [1, 64, 306].
-- sensor_dataset.py : 21 đặc trưng C_integrated19 + mask, preprocessor fit trên Train.
+Composed from 3 sub-datasets:
+- image_dataset.py  : image transforms (CLAHE, 384x384, ImageNet norm) matching the unimodal vision branch.
+- audio_dataset.py  : Member 2's AudioPreprocessor -> log-Mel [1, 64, 306].
+- sensor_dataset.py : 21 features C_integrated19 + mask, preprocessor fit on Train.
 
-Quy tắc ghép cặp (zero fruit-level leakage): mọi thành phần của 1 mẫu đều thuộc CÙNG một quả.
-- Mỗi ẢNH RGB của quả là một mẫu (6-24 ảnh / quả).
-- Âm thanh: Train chọn ngẫu nhiên 1 file của quả mỗi lần lấy mẫu; Val/Test xoay vòng tất định
-  (ảnh thứ k dùng file k % n) để cả Android và iPhone đều được chấm.
-- Cảm biến: vector của quả (giống nhau cho mọi mẫu của quả).
+Pairing rule (zero fruit-level leakage): all components of 1 sample belong to the SAME fruit.
+- Each RGB IMAGE of a fruit forms one sample (6-24 images / fruit).
+- Audio: Train randomly selects 1 audio file of the fruit per sample; Val/Test cycles deterministically
+  (image k uses file k % n) so both Android and iPhone recordings are evaluated.
+- Sensor: fruit-level feature vector (shared across all samples of the fruit).
 
-Thiếu phương thức (manifest: một số quả không có âm thanh / ảnh): tensor tương ứng = 0.
-MultiModalTeacher coi input toàn 0 là "vắng mặt" và che đặc trưng nhánh đó (cũng là cách
-eval_teacher.py làm zero-masking ablation).
+Missing modality (manifest: some fruits lack audio / RGB): corresponding tensor = 0.
+MultiModalTeacher treats an all-zero input as "absent" and masks that branch's features
+(which is also how eval_teacher.py performs zero-masking ablation).
 
-Phần tử thứ 6 (dict) mang thông tin phụ `camera_angle`, `device` để eval_teacher.py tách metric
-(nếu chỉ cần 5 phần tử, đặt `return_extras=False`).
+The 6th element (dict) carries auxiliary metadata `camera_angle`, `device` so eval_teacher.py can
+break down metrics (if only 5 elements are needed, set `return_extras=False`).
 """
 
 from __future__ import annotations
@@ -48,17 +48,17 @@ SPLIT_DIRS = {"train": "train", "val": "valid", "valid": "valid", "test": "test"
 
 def split_dir_name(split: str) -> str:
     if split not in SPLIT_DIRS:
-        raise ValueError(f"split phải thuộc {list(SPLIT_DIRS)}, nhận được {split!r}")
+        raise ValueError(f"split must be one of {list(SPLIT_DIRS)}, got {split!r}")
     return SPLIT_DIRS[split]
 
 
 class MultimodalDataset(Dataset):
-    """Dataset đa phương thức đồng bộ theo fruit_id.
+    """Multimodal dataset synchronized by fruit_id.
 
-    Hỗ trợ 2 cách khởi tạo:
-    1. Trực tiếp (tiện dụng như trong tmp.md):
+    Supports 2 initialization styles:
+    1. Direct (convenient):
        `MultimodalDataset(manifest_path, data_dir, split="train", is_training=True)`
-    2. Qua factory `build_multimodal_datasets(...)` (dùng chung preprocessor giữa các split):
+    2. Via factory `build_multimodal_datasets(...)` (shares preprocessor across splits):
        `MultimodalDataset(split, manifest_df, data_dir, sensor_vecs=..., audio_bank=..., train=...)`
     """
 
@@ -84,9 +84,9 @@ class MultimodalDataset(Dataset):
         if img_size is not None:
             image_size = img_size
 
-        # Phân biệt 2 kiểu gọi constructor
+        # Distinguish between the 2 constructor call patterns
         if isinstance(manifest_or_data_dir, pd.DataFrame):
-            # Kiểu 2: MultimodalDataset(split, manifest_df, data_dir, sensor_vecs, audio_bank, ...)
+            # Style 2: MultimodalDataset(split, manifest_df, data_dir, sensor_vecs, audio_bank, ...)
             resolved_split = split_dir_name(str(split_or_manifest))
             manifest = manifest_or_data_dir
             resolved_data_dir = Path(data_dir)
@@ -94,7 +94,7 @@ class MultimodalDataset(Dataset):
                 bool(is_training) if is_training is not None else (resolved_split == "train")
             )
         else:
-            # Kiểu 1: MultimodalDataset(manifest_path, data_dir, split="train", is_training=True)
+            # Style 1: MultimodalDataset(manifest_path, data_dir, split="train", is_training=True)
             manifest_path = Path(split_or_manifest)
             resolved_data_dir = Path(manifest_or_data_dir)
             resolved_split = split_dir_name(split or "train")
@@ -142,7 +142,7 @@ class MultimodalDataset(Dataset):
 
         self.samples: List[Dict] = []
         for fid in self.label_map:
-            imgs = img_by_fruit.get(fid) or [None]  # quả không có ảnh vẫn giữ 1 mẫu (ảnh = 0)
+            imgs = img_by_fruit.get(fid) or [None]  # fruits without RGB still keep 1 sample (image = 0)
             audios = audio_by_fruit.get(fid, [])
             for k, img in enumerate(imgs):
                 self.samples.append({
@@ -203,7 +203,7 @@ class MultimodalDataset(Dataset):
 
 
 def worker_init_fn(worker_id: int) -> None:
-    """Mỗi worker một seed riêng cho augmentation âm thanh (tránh trùng chuỗi ngẫu nhiên)."""
+    """Assign each worker a distinct seed for audio augmentation (avoids identical random sequences)."""
     info = get_worker_info()
     if info is not None and hasattr(info.dataset, "reseed"):
         info.dataset.reseed((torch.initial_seed() + worker_id) % (2 ** 32))
@@ -220,9 +220,9 @@ def build_multimodal_datasets(
     seed: int = 42,
     verbose: bool = True,
 ) -> Dict[str, MultimodalDataset]:
-    """Dựng MultimodalDataset cho các split yêu cầu (train => augmentation bật).
+    """Build MultimodalDataset for the requested splits (train => augmentation enabled).
 
-    Preprocessor cảm biến luôn được nạp/fit theo tập Train (kể cả khi chỉ yêu cầu Test).
+    The sensor preprocessor is always loaded/fit on the Train split (even when only Test is requested).
     """
     manifest = pd.read_csv(manifest_path)
     data_dir = Path(data_dir)
@@ -238,12 +238,12 @@ def build_multimodal_datasets(
         vecs = sensor_vectors(sensor_pre, table)
         files = list_audio_files(data_dir / sp / "sound")
         if verbose:
-            print(f"[data] {sp}: đang cắt tiếng gõ của {len(files)} file âm thanh ...", flush=True)
+            print(f"[data] {sp}: extracting knocks from {len(files)} audio files ...", flush=True)
         bank = AudioKnockBank(files, audio_pre)
         ds = MultimodalDataset(sp, manifest, data_dir, vecs, bank, train=(sp == "train"),
                                image_size=image_size, sensor_dim=len(sensor_feature_cols), seed=seed)
         if ds.stats["n_samples"] == 0:
-            raise RuntimeError(f"Split {sp} không có mẫu nào. Kiểm tra {data_dir / sp}.")
+            raise RuntimeError(f"Split {sp} has 0 samples. Check {data_dir / sp}.")
         if verbose:
             print(f"[data] {ds.stats}", flush=True)
         out[split] = ds

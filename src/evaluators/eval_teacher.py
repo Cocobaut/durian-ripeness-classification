@@ -1,8 +1,8 @@
-"""Cầu nối đánh giá mô hình Multi-Modal Teacher trong `src/evaluators/`.
+"""Evaluation bridge for the Multi-Modal Teacher model in `src/evaluators/`.
 
-Tái xuất (re-export) `TeacherEvaluator`, `TeacherEvaluatorConfig`, `evaluate` từ
-`workspaces/member2_audio/03_test_eval_teacher_and_gradcam/eval_teacher.py`
-đồng thời hỗ trợ chạy CLI trực tiếp với kiến trúc `MultiModalTeacher` và `MultimodalDataset`.
+Re-exports `TeacherEvaluator`, `TeacherEvaluatorConfig`, and `evaluate` from
+`workspaces/member2_audio/03_test_eval_teacher_and_gradcam/eval_teacher.py`,
+while supporting direct CLI execution with `MultiModalTeacher` and `MultimodalDataset`.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from eval_teacher import (  # noqa: E402, F401
 
 
 def run_cli() -> dict:
-    """Chạy đánh giá Teacher hoàn chỉnh từ dòng lệnh."""
+    """Run full Teacher evaluation from the command line."""
     args = parse_args()
     ckpt_path = resolve_path(args.checkpoint)
     manifest_path = resolve_path(args.manifest)

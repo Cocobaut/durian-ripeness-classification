@@ -1,22 +1,22 @@
-"""Module tiền xử lý và làm giàu dữ liệu ảnh cho nhánh thị giác (Vision Modality).
+"""Image preprocessing and augmentation module for the Vision modality.
 
-Phụ trách: Member 1 (Vision Lead)
+Responsible: Member 1 (Vision Lead)
 
-Module chỉ gồm một class duy nhất `VisionPreprocessor`, gom toàn bộ các bước đã được
-kiểm chứng trong notebook `01_eda_and_preprocess_vision.ipynb`:
-- Đọc ảnh 24MP tốc độ cao (giải mã JPEG ở độ phân giải thấp bằng chế độ draft).
-- Resize giữ nguyên tỷ lệ khung hình 3:2 rồi mới crop về ảnh vuông.
-- Cân bằng sáng cục bộ CLAHE trên kênh L (không gian màu LAB).
-- Pipeline tăng cường dữ liệu cho tập train theo 3 mức: light, medium, strong.
-- Pipeline chuẩn hóa cố định cho tập val/test.
-- Mixup và CutMix ở cấp độ batch, sinh nhãn mềm phục vụ chưng cất tri thức.
+This module contains a single class `VisionPreprocessor`, consolidating all steps
+validated in `01_eda_and_preprocess_vision.ipynb`:
+- Fast 24MP image decoding (JPEG low-resolution decoding via draft mode).
+- Aspect-ratio-preserving resize (3:2) prior to square cropping.
+- Local contrast enhancement with CLAHE on the L channel (LAB color space).
+- Training augmentation pipelines across 3 levels: light, medium, strong.
+- Deterministic normalization pipeline for val/test splits.
+- Batch-level Mixup and CutMix generating soft labels for knowledge distillation.
 
-Ví dụ sử dụng:
+Usage example:
     preprocessor = VisionPreprocessor(image_size=224, aug_policy="medium")
     train_tf = preprocessor.get_train_transforms()
     val_tf = preprocessor.get_val_transforms()
 
-    # Trong vòng lặp huấn luyện
+    # Inside training loop
     images, soft_targets = preprocessor.mix_batch(images, labels)
 """
 
@@ -31,22 +31,22 @@ from PIL import Image
 
 
 class VisionPreprocessor:
-    """Bộ tiền xử lý và làm giàu dữ liệu ảnh RGB quả sầu riêng.
+    """Preprocessor and augmentation pipeline for durian RGB images.
 
-    Class cung cấp:
-    - `get_train_transforms()` / `get_val_transforms()`: pipeline torchvision dùng cho Dataset.
-    - `load_image()`: đọc ảnh từ đường dẫn, numpy array hoặc PIL Image.
-    - `preprocess_image()`: tiền xử lý một ảnh đơn lẻ thành tensor (C, H, W).
-    - `apply_clahe()`: áp dụng riêng CLAHE để trực quan hóa.
-    - `denormalize()`: đưa tensor đã chuẩn hóa về ảnh uint8 để hiển thị.
-    - `mix_batch()`: Mixup / CutMix ở cấp độ batch, trả về nhãn mềm.
+    Provides:
+    - `get_train_transforms()` / `get_val_transforms()`: torchvision pipelines for Datasets.
+    - `load_image()`: load an image from file path, numpy array, or PIL Image.
+    - `preprocess_image()`: preprocess a single image into a (C, H, W) tensor.
+    - `apply_clahe()`: apply CLAHE standalone for visualization.
+    - `denormalize()`: convert normalized tensors back to uint8 images for display.
+    - `mix_batch()`: batch-level Mixup / CutMix returning soft labels.
     """
 
     IMAGENET_MEAN = (0.485, 0.456, 0.406)
     IMAGENET_STD = (0.229, 0.224, 0.225)
 
-    # Cấu hình cho từng mức tăng cường dữ liệu.
-    # color_jitter = (brightness, contrast, saturation, hue); None nghĩa là tắt.
+    # Configuration for each data augmentation level.
+    # color_jitter = (brightness, contrast, saturation, hue); None disables it.
     POLICY_CONFIGS: Dict[str, Dict] = {
         "light": {
             "crop_scale": (0.85, 1.0),
@@ -75,12 +75,11 @@ class VisionPreprocessor:
     }
 
     class ClaheTransform:
-        """Transform áp dụng CLAHE lên kênh L của không gian màu LAB.
+        """Transform applying CLAHE on the L channel of LAB color space.
 
-        Chỉ can thiệp vào kênh độ sáng L nên làm nổi bật rãnh gai và đĩa cuống
-        mà không làm lệch màu vỏ quả (kênh A, B được giữ nguyên).
-        Được khai báo dạng class lồng nhau (thay vì lambda) để có thể pickle
-        khi DataLoader dùng nhiều worker.
+        Modifies only the lightness channel L to highlight spine grooves and pedicel discs
+        without shifting shell color (channels A and B remain untouched).
+        Defined as a nested class (instead of lambda) to remain picklable in multi-worker DataLoaders.
         """
 
         def __init__(self, clip_limit: float = 2.0, tile_grid_size: Tuple[int, int] = (8, 8)):
@@ -88,7 +87,7 @@ class VisionPreprocessor:
             self.tile_grid_size = tuple(tile_grid_size)
 
         def __call__(self, img: Union[Image.Image, np.ndarray]) -> Image.Image:
-            """Nhận ảnh PIL hoặc numpy RGB, trả về ảnh PIL RGB đã cân bằng sáng."""
+            """Accept a PIL or numpy RGB image and return a contrast-enhanced PIL RGB image."""
             rgb = np.asarray(img.convert("RGB")) if isinstance(img, Image.Image) else img
             l_channel, a_channel, b_channel = cv2.split(cv2.cvtColor(rgb, cv2.COLOR_RGB2LAB))
             clahe = cv2.createCLAHE(clipLimit=self.clip_limit, tileGridSize=self.tile_grid_size)
@@ -113,25 +112,25 @@ class VisionPreprocessor:
         cutmix_alpha: float = 1.0,
         mix_prob: float = 1.0,
     ):
-        """Khởi tạo bộ tiền xử lý.
+        """Initialize the vision preprocessor.
 
         Args:
-            image_size: Kích thước ảnh đầu ra, nhận int (ảnh vuông) hoặc tuple (H, W).
-            use_clahe: Bật/tắt bước cân bằng sáng CLAHE.
-            clahe_clip_limit: Ngưỡng giới hạn tương phản của CLAHE.
-            clahe_tile_grid_size: Kích thước lưới chia ô của CLAHE.
-            aug_policy: Mức tăng cường dữ liệu cho tập train: "light", "medium" hoặc "strong".
-            resize_ratio: Tỷ lệ giữa cạnh ngắn sau resize và kích thước crop (mặc định 1.14 ~ 256/224).
-            mean: Trung bình chuẩn hóa theo kênh RGB, mặc định dùng thống kê ImageNet.
-            std: Độ lệch chuẩn chuẩn hóa theo kênh RGB, mặc định dùng thống kê ImageNet.
-            num_classes: Số lớp độ chín, dùng khi tạo nhãn mềm.
-            mixup_alpha: Tham số phân phối Beta của Mixup (0 để tắt Mixup).
-            cutmix_alpha: Tham số phân phối Beta của CutMix (0 để tắt CutMix).
-            mix_prob: Xác suất áp dụng Mixup/CutMix cho mỗi batch.
+            image_size: Output image size, int (square) or tuple (H, W).
+            use_clahe: Enable/disable CLAHE contrast enhancement.
+            clahe_clip_limit: Contrast limiting threshold for CLAHE.
+            clahe_tile_grid_size: Grid size for CLAHE tiles.
+            aug_policy: Training augmentation level: "light", "medium", or "strong".
+            resize_ratio: Ratio between resized short side and crop size (default 1.14 ~ 256/224).
+            mean: RGB normalization mean; defaults to ImageNet statistics.
+            std: RGB normalization std; defaults to ImageNet statistics.
+            num_classes: Number of ripeness classes for soft targets.
+            mixup_alpha: Beta distribution parameter for Mixup (0 disables Mixup).
+            cutmix_alpha: Beta distribution parameter for CutMix (0 disables CutMix).
+            mix_prob: Probability of applying Mixup/CutMix per batch.
         """
         policy = aug_policy.lower()
         if policy not in self.POLICY_CONFIGS:
-            raise ValueError(f"aug_policy phải thuộc {list(self.POLICY_CONFIGS)}, nhận được: '{aug_policy}'")
+            raise ValueError(f"aug_policy must be one of {list(self.POLICY_CONFIGS)}, got: '{aug_policy}'")
 
         self.image_size = (image_size, image_size) if isinstance(image_size, int) else tuple(image_size)
         self.resize_size = int(round(min(self.image_size) * resize_ratio))
@@ -153,10 +152,10 @@ class VisionPreprocessor:
     # Pipeline transforms
     # ------------------------------------------------------------------
     def _build_common_head(self) -> list:
-        """Các bước đầu chung cho cả train và val: resize giữ tỷ lệ, sau đó CLAHE.
+        """Shared initial steps for train and val: aspect-preserving resize, then CLAHE.
 
-        Resize theo cạnh ngắn (truyền vào một số nguyên) nên ảnh 6000x4000 trở thành
-        khoảng 382x256, không bị bóp méo. CLAHE đặt sau resize để chạy nhanh trên ảnh nhỏ.
+        Resizing by short side (passing a single integer) scales 6000x4000 images to
+        roughly 382x256 without distortion. CLAHE runs after resize for speed on smaller images.
         """
         head = [transforms.Resize(self.resize_size, interpolation=transforms.InterpolationMode.BILINEAR)]
         if self.use_clahe:
@@ -164,11 +163,11 @@ class VisionPreprocessor:
         return head
 
     def _build_normalize_tail(self) -> list:
-        """Các bước cuối chung: chuyển sang tensor và chuẩn hóa theo mean/std."""
+        """Shared final steps: convert to tensor and normalize by mean/std."""
         return [transforms.ToTensor(), transforms.Normalize(mean=self.mean, std=self.std)]
 
     def _build_train_transforms(self) -> transforms.Compose:
-        """Xây dựng pipeline tăng cường dữ liệu cho tập train theo `aug_policy`."""
+        """Build training augmentation pipeline according to `aug_policy`."""
         cfg = self.POLICY_CONFIGS[self.aug_policy]
         steps = self._build_common_head()
 
@@ -205,32 +204,32 @@ class VisionPreprocessor:
         return transforms.Compose(steps)
 
     def _build_val_transforms(self) -> transforms.Compose:
-        """Xây dựng pipeline cố định (không ngẫu nhiên) cho tập val/test: resize giữ tỷ lệ rồi center crop."""
+        """Build deterministic pipeline for val/test: aspect-preserving resize then center crop."""
         steps = self._build_common_head()
         steps.append(transforms.CenterCrop(self.image_size))
         steps += self._build_normalize_tail()
         return transforms.Compose(steps)
 
     def get_train_transforms(self) -> transforms.Compose:
-        """Trả về pipeline transforms cho tập train."""
+        """Return transforms pipeline for the train split."""
         return self.train_transforms
 
     def get_val_transforms(self) -> transforms.Compose:
-        """Trả về pipeline transforms cho tập val/test."""
+        """Return transforms pipeline for the val/test splits."""
         return self.val_transforms
 
     # ------------------------------------------------------------------
-    # Xử lý ảnh đơn lẻ
+    # Single-image processing
     # ------------------------------------------------------------------
     def load_image(self, image_input: Union[str, Image.Image, np.ndarray]) -> Image.Image:
-        """Đọc ảnh và trả về PIL Image RGB.
+        """Load image and return an RGB PIL Image.
 
-        Với file JPEG, dùng `Image.draft` để giải mã trực tiếp ở độ phân giải thấp hơn
-        (vẫn lớn hơn kích thước resize), giúp đọc ảnh 24MP nhanh hơn nhiều lần.
+        For JPEG files, uses `Image.draft` to decode directly at a lower resolution
+        (still larger than the resize size), speeding up 24MP image reads significantly.
         """
         if isinstance(image_input, str):
             if not os.path.exists(image_input):
-                raise FileNotFoundError(f"Không tìm thấy file ảnh: {image_input}")
+                raise FileNotFoundError(f"Image file not found: {image_input}")
             img = Image.open(image_input)
             draft_size = self.resize_size * 2
             img.draft("RGB", (draft_size, draft_size))
@@ -239,23 +238,23 @@ class VisionPreprocessor:
             return Image.fromarray(image_input).convert("RGB")
         if isinstance(image_input, Image.Image):
             return image_input.convert("RGB")
-        raise TypeError(f"Định dạng ảnh không được hỗ trợ: {type(image_input)}")
+        raise TypeError(f"Unsupported image input type: {type(image_input)}")
 
     def preprocess_image(
         self,
         image_input: Union[str, Image.Image, np.ndarray],
         is_train: bool = False,
     ) -> torch.Tensor:
-        """Tiền xử lý một ảnh đơn lẻ, trả về tensor (C, H, W) đã chuẩn hóa."""
+        """Preprocess a single image, returning a normalized (C, H, W) tensor."""
         pipeline = self.train_transforms if is_train else self.val_transforms
         return pipeline(self.load_image(image_input))
 
     def apply_clahe(self, img: Union[Image.Image, np.ndarray]) -> Image.Image:
-        """Áp dụng riêng bước CLAHE lên ảnh, dùng cho mục đích trực quan hóa."""
+        """Apply CLAHE standalone to an image for visualization purposes."""
         return self.clahe(img)
 
     def denormalize(self, tensor: torch.Tensor) -> np.ndarray:
-        """Chuyển tensor đã chuẩn hóa (C, H, W) hoặc (1, C, H, W) về ảnh numpy RGB uint8."""
+        """Convert normalized tensor (C, H, W) or (1, C, H, W) back to uint8 RGB numpy image."""
         if tensor.dim() == 4:
             tensor = tensor.squeeze(0)
         mean = torch.tensor(self.mean).view(3, 1, 1)
@@ -264,17 +263,17 @@ class VisionPreprocessor:
         return (img.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
 
     # ------------------------------------------------------------------
-    # Mixup / CutMix cấp độ batch
+    # Batch-level Mixup / CutMix
     # ------------------------------------------------------------------
     def mix_batch(self, images: torch.Tensor, labels: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Áp dụng Mixup hoặc CutMix (chọn ngẫu nhiên 50/50) lên một batch.
+        """Apply Mixup or CutMix (50/50 random choice) to a batch.
 
         Args:
-            images: Tensor ảnh (B, C, H, W) đã qua train transforms.
-            labels: Nhãn dạng chỉ số (B,) hoặc nhãn mềm (B, num_classes), ví dụ xác suất từ teacher.
+            images: Image tensor (B, C, H, W) after train transforms.
+            labels: Class index labels (B,) or soft labels (B, num_classes), e.g., teacher probabilities.
 
         Returns:
-            Tuple (ảnh đã trộn, nhãn mềm kích thước (B, num_classes)).
+            Tuple (mixed images, soft labels of shape (B, num_classes)).
         """
         targets = self._to_soft_targets(labels)
         mixup_on, cutmix_on = self.mixup_alpha > 0, self.cutmix_alpha > 0
@@ -289,7 +288,7 @@ class VisionPreprocessor:
             y1, x1, y2, x2 = self._random_bbox(images.shape[2], images.shape[3], lam)
             images = images.clone()
             images[:, :, y1:y2, x1:x2] = images[perm, :, y1:y2, x1:x2]
-            # Tính lại lambda theo diện tích thực tế sau khi bbox bị cắt ở biên ảnh
+            # Recompute lambda from actual area after clipping bbox to image boundaries
             lam = 1.0 - (y2 - y1) * (x2 - x1) / (images.shape[2] * images.shape[3])
         else:
             lam = float(np.random.beta(self.mixup_alpha, self.mixup_alpha))
@@ -298,17 +297,17 @@ class VisionPreprocessor:
         return images, lam * targets + (1.0 - lam) * targets[perm]
 
     def _to_soft_targets(self, labels: torch.Tensor) -> torch.Tensor:
-        """Chuyển nhãn chỉ số sang one-hot; nếu đã là nhãn mềm thì giữ nguyên."""
+        """Convert class indices to one-hot; keep soft labels unchanged."""
         if labels.dim() == 2:
             return labels.float()
         return torch.nn.functional.one_hot(labels.long(), self.num_classes).float()
 
     @staticmethod
     def _random_bbox(height: int, width: int, lam: float) -> Tuple[int, int, int, int]:
-        """Sinh hộp cắt ngẫu nhiên cho CutMix, diện tích xấp xỉ (1 - lam) diện tích ảnh.
+        """Generate a random CutMix crop box with area approximately (1 - lam) of image area.
 
         Returns:
-            Tuple (y1, x1, y2, x2) đã được giới hạn trong biên ảnh.
+            Tuple (y1, x1, y2, x2) clipped to image bounds.
         """
         cut_ratio = np.sqrt(1.0 - lam)
         cut_h, cut_w = int(height * cut_ratio), int(width * cut_ratio)

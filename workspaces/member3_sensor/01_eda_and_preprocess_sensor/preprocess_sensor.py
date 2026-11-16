@@ -1,18 +1,18 @@
-"""Module tiền xử lý dữ liệu cảm biến toàn diện (Sensor Modality Pipeline).
+"""Comprehensive sensor data preprocessing module (Sensor Modality Pipeline).
 
-Phụ trách: Member 3 (Nhánh Cảm biến / Bảng số liệu / Quang phổ / Nhiệt)
-Dự án: Phân loại độ chín sầu riêng bằng chưng cất tri thức đa phương thức (CMKD)
+Responsible: Member 3 (Sensor / Tabular / Spectral / Thermal Modalities)
+Project: Durian Ripeness Classification via Cross-Modal Knowledge Distillation (CMKD)
 
-Module tích hợp trọn vẹn 3 phân nhánh cảm biến:
-1. Bảng số liệu đặc tính sinh hóa (Tabular Physicochemical CSV: Firmness, TSS, Dry Matter...).
-2. Ảnh nhiệt (Thermal Matrix CSV: tách nền Otsu, bù trừ nhiệt độ phòng delta_temp_fg_bg).
-3. Ảnh đa phổ (Multispectral Mosaic TIF: tách 8 bands 256x256, phổ phản xạ trung bình).
+Integrates all 3 sensor sub-modalities:
+1. Tabular physicochemical CSV (Firmness, TSS, Dry Matter...).
+2. Thermal images (Thermal Matrix CSV: Otsu background separation, ambient offset delta_temp_fg_bg).
+3. Multispectral images (Multispectral Mosaic TIF: unpack 8 bands of 256x256, mean reflectance).
 
-Cung cấp:
-- Class `SensorPreprocessor`: Tiền xử lý, lọc outlier, chuẩn hóa và xuất Tensor PyTorch.
-- Các hàm trích xuất ảnh nhiệt và ảnh đa phổ cấp độ quả (fruit_id).
-- Class `SensorDataset`: PyTorch Dataset phục vụ nạp dữ liệu cho Teacher/Student.
-- Class `SensorBackbone`: Mạng MLP trích xuất vector đặc trưng f_sensor trong Fusion Module.
+Provides:
+- `SensorPreprocessor`: Missing value imputation, outlier clipping, scaling, and PyTorch tensor export.
+- Fruit-level thermal and multispectral feature extraction helpers (`fruit_id`).
+- `SensorDataset`: PyTorch Dataset for Teacher/Student training.
+- `SensorBackbone`: MLP extracting latent vector f_sensor for the Fusion Module.
 """
 
 import hashlib
@@ -30,30 +30,49 @@ import sklearn
 import torch
 import torch.nn as nn
 from PIL import Image
-from skimage.filters import threshold_otsu
+try:
+    from skimage.filters import threshold_otsu
+except ImportError:  # NumPy fallback when scikit-image is not installed
+    def threshold_otsu(image: np.ndarray, nbins: int = 256) -> float:
+        """Compute 1D Otsu threshold using NumPy when scikit-image is unavailable."""
+        arr = np.asarray(image, dtype=np.float64).ravel()
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            return 0.0
+        if float(arr.max() - arr.min()) <= 0.0:
+            return float(arr[0])
+        hist, bin_edges = np.histogram(arr, bins=nbins)
+        hist = hist.astype(np.float64)
+        bin_centers = 0.5 * (bin_edges[:-1] + bin_edges[1:])
+        weight1 = np.cumsum(hist)
+        weight2 = np.cumsum(hist[::-1])[::-1]
+        mean1 = np.cumsum(hist * bin_centers) / np.maximum(weight1, 1e-12)
+        mean2 = (np.cumsum((hist * bin_centers)[::-1]) / np.maximum(weight2[::-1], 1e-12))[::-1]
+        variance12 = weight1[:-1] * weight2[1:] * (mean1[:-1] - mean2[1:]) ** 2
+        return float(bin_centers[int(np.argmax(variance12))])
 from sklearn.preprocessing import RobustScaler, StandardScaler
 from torch.utils.data import Dataset
 
 # ------------------------------------------------------------------------------
-# 1. HẰNG SỐ CHUẨN TOÀN DỰ ÁN
+# 1. PROJECT-WIDE CONSTANTS
 # ------------------------------------------------------------------------------
 CLASS_ORDER = ["Unripe", "Ripe", "Overripe"]  # Unripe=0, Ripe=1, Overripe=2
 LABEL_TO_IDX = {c: i for i, c in enumerate(CLASS_ORDER)}
 IDX_TO_LABEL = {i: c for i, c in enumerate(CLASS_ORDER)}
 
-# 8 đặc trưng bảng số liệu cốt lõi (loại bỏ biến rò rỉ sau thu hoạch)
+# 8 core tabular features (post-harvest leakage variables excluded)
 DEFAULT_FEATURE_COLS = [
     "Harvest_Weight", "Horizontal_Circumference", "Vertical_Circumference",
     "Pedicel_Diameter", "Firmness_AVE", "TSS_AVE", "Dry_Matter_AVE", "ESR_Days",
 ]
 
-# Các đặc trưng rút trích từ ảnh nhiệt
+# Features extracted from thermal matrices
 THERMAL_FEATURE_COLS = ["fg_mean_temp", "fg_std_temp", "delta_temp_fg_bg"]
 
-# Các đặc trưng rút trích từ ảnh đa phổ (8 băng tần)
+# Features extracted from multispectral images (8 spectral bands)
 MULTISPECTRAL_FEATURE_COLS = [f"band_{i}_mean" for i in range(1, 9)]
 
-# Bộ đặc trưng cảm biến tích hợp toàn diện (Tabular + Thermal + Multispectral = 19 chiều)
+# Integrated sensor feature set (Tabular + Thermal + Multispectral = 19 dims)
 INTEGRATED_SENSOR_COLS = DEFAULT_FEATURE_COLS + THERMAL_FEATURE_COLS + MULTISPECTRAL_FEATURE_COLS
 
 FRUIT_ID_FMT = "durian_{:03d}"
@@ -61,26 +80,26 @@ ID_COL = "Replicate"
 
 
 def make_fruit_id(df: pd.DataFrame, id_col: str = ID_COL, fmt: str = FRUIT_ID_FMT) -> List[str]:
-    """Tạo danh sách fruit_id chuẩn từ cột Replicate hoặc Code: 'R7' -> 'durian_007'."""
+    """Generate standardized fruit_id list from Replicate or Code column: 'R7' -> 'durian_007'."""
     if id_col not in df.columns:
-        # Fallback thử cột 'Code' nếu không có Replicate
+        # Fallback to 'Code' column if Replicate is absent
         if "Code" in df.columns:
             id_col = "Code"
         else:
-            raise KeyError(f"Thiếu cột '{id_col}' để tạo fruit_id")
+            raise KeyError(f"Missing column '{id_col}' to construct fruit_id")
             
     digits = df[id_col].astype(str).str.extract(r"(\d+)")[0]
     if digits.isna().any():
         bad = df.loc[digits.isna(), id_col].tolist()
-        raise ValueError(f"Không tách được số từ {id_col}: {bad}")
+        raise ValueError(f"Failed to extract integer ID from {id_col}: {bad}")
     return [fmt.format(int(d)) for d in digits]
 
 
 # ------------------------------------------------------------------------------
-# 2. HÀM XỬ LÝ ẢNH NHIỆT (THERMAL MATRIX)
+# 2. THERMAL MATRIX PROCESSING
 # ------------------------------------------------------------------------------
 def load_thermal_matrix(csv_path: Union[str, Path]) -> Optional[np.ndarray]:
-    """Đọc ma trận nhiệt độ từ file CSV (xử lý linh hoạt dấu phân cách ',' hoặc ';')."""
+    """Load temperature matrix from CSV (handles both ',' and ';' delimiters)."""
     try:
         csv_path = Path(csv_path)
         if not csv_path.exists():
@@ -96,7 +115,7 @@ def load_thermal_matrix(csv_path: Union[str, Path]) -> Optional[np.ndarray]:
 
 
 def extract_thermal_features(mat: np.ndarray) -> Dict[str, float]:
-    """Tách nhiễu nhiệt nền bằng Otsu kết hợp tâm quả và trích xuất đặc trưng."""
+    """Separate background thermal noise using Otsu thresholding + center heuristic and extract stats."""
     valid_vals = mat[np.isfinite(mat)]
     if len(valid_vals) == 0:
         return {
@@ -123,16 +142,16 @@ def extract_thermal_features(mat: np.ndarray) -> Dict[str, float]:
         "fg_max": float(np.max(fg_temps)) if len(fg_temps) > 0 else fg_mean,
         "fg_min": float(np.min(fg_temps)) if len(fg_temps) > 0 else fg_mean,
         "bg_mean": bg_mean,
-        "delta_temp_fg_bg": fg_mean - bg_mean,  # Độ chênh nhiệt quả - nền (triệt tiêu nhiệt độ phòng)
+        "delta_temp_fg_bg": fg_mean - bg_mean,  # Fruit-vs-background thermal contrast (cancels room temp)
         "thresh": float(thresh),
     }
 
 
 # ------------------------------------------------------------------------------
-# 3. HÀM XỬ LÝ ẢNH ĐA PHỔ (MULTISPECTRAL MOSAIC TIF)
+# 3. MULTISPECTRAL MOSAIC TIF PROCESSING
 # ------------------------------------------------------------------------------
 def safe_read_tif(file_path: Union[str, Path]) -> Optional[np.ndarray]:
-    """Đọc ảnh .tif an toàn (hỗ trợ cả tifffile và PIL fallback)."""
+    """Safely load .tif image (supports both tifffile and PIL fallback)."""
     try:
         import tifffile as tiff
         return tiff.imread(str(file_path)).astype(np.float32)
@@ -145,7 +164,7 @@ def safe_read_tif(file_path: Union[str, Path]) -> Optional[np.ndarray]:
 
 
 def unpack_multispectral_grid(img_raw: np.ndarray) -> np.ndarray:
-    """Chuyển ảnh mosaic 2D (512, 1024) gồm 8 băng tần thành mảng 3D (256, 256, 8)."""
+    """Unpack a 2D mosaic image (512, 1024) of 8 spectral bands into a 3D array (256, 256, 8)."""
     if img_raw.ndim == 2 and img_raw.shape == (512, 1024):
         bands = []
         for r in range(2):
@@ -163,7 +182,7 @@ def unpack_multispectral_grid(img_raw: np.ndarray) -> np.ndarray:
 
 
 def extract_multispectral_features(img_raw: np.ndarray, fg_percentile: float = 15.0) -> Dict[str, float]:
-    """Rút trích cường độ phản xạ phổ của 8 băng tần sau khi loại bỏ nền tối."""
+    """Extract mean/std spectral reflectance across 8 bands after filtering dark background."""
     img = unpack_multispectral_grid(img_raw)
     if img.ndim != 3 or img.shape[-1] < 8:
         return {f"band_{i}_mean": 0.0 for i in range(1, 9)}
@@ -180,10 +199,10 @@ def extract_multispectral_features(img_raw: np.ndarray, fg_percentile: float = 1
 
 
 # ------------------------------------------------------------------------------
-# 4. TRÍCH XUẤT ĐẶC TRƯNG TÍCH HỢP CHO TỪNG QUẢ (MULTI-ANGLE AGGREGATION)
+# 4. INTEGRATED FRUIT-LEVEL FEATURE EXTRACTION (MULTI-ANGLE AGGREGATION)
 # ------------------------------------------------------------------------------
 def extract_fruit_thermal_vector(fruit_id: str, search_dir: Union[str, Path]) -> Dict[str, float]:
-    """Gộp trung bình đặc trưng ảnh nhiệt qua các góc chụp của một quả."""
+    """Average thermal image features across all camera angles of a fruit."""
     search_path = Path(search_dir)
     target_dir = search_path / "dataset_clean_thermal" if (search_path / "dataset_clean_thermal").exists() else search_path
     pattern = f"*{fruit_id}*_thermal.csv"
@@ -213,7 +232,7 @@ def extract_fruit_thermal_vector(fruit_id: str, search_dir: Union[str, Path]) ->
 
 
 def extract_fruit_multispectral_vector(fruit_id: str, search_dir: Union[str, Path]) -> Dict[str, float]:
-    """Gộp trung bình phổ phản xạ qua các góc chụp của một quả."""
+    """Average spectral reflectance across all camera angles of a fruit."""
     search_path = Path(search_dir)
     target_dir = search_path / "dataset_clean_multispectral" if (search_path / "dataset_clean_multispectral").exists() else search_path
     pattern = f"*{fruit_id}*.tif"
@@ -244,7 +263,7 @@ def build_integrated_sensor_dataframe(
     include_thermal: bool = True,
     include_multispectral: bool = True
 ) -> pd.DataFrame:
-    """Tạo bảng dữ liệu cảm biến tích hợp hoàn chỉnh (Tabular + Thermal + Multispectral)."""
+    """Build complete integrated sensor DataFrame (Tabular + Thermal + Multispectral)."""
     df_out = tabular_df.copy()
     if "fruit_id" not in df_out.columns:
         df_out["fruit_id"] = make_fruit_id(df_out)
@@ -319,10 +338,10 @@ def build_integrated_sensor_dataframe(
 
 
 # ------------------------------------------------------------------------------
-# 5. CLASS SENSOR PREPROCESSOR
+# 5. SENSOR PREPROCESSOR CLASS
 # ------------------------------------------------------------------------------
 class SensorPreprocessor:
-    """Bộ tiền xử lý nâng cao cho nhánh cảm biến (Sensor / Tabular / Thermal / Spectral)."""
+    """Comprehensive preprocessor for the sensor branch (Tabular / Thermal / Spectral)."""
 
     def __init__(
         self,
@@ -347,7 +366,7 @@ class SensorPreprocessor:
         self.quantile_range = quantile_range
         self.scaler_type = scaler_type.lower()
         
-        # Các tham số học được từ tập Train
+        # Parameters learned from the Train split
         self.medians_: Optional[pd.Series] = None
         self.lower_bounds_: Optional[pd.Series] = None
         self.upper_bounds_: Optional[pd.Series] = None
@@ -366,61 +385,61 @@ class SensorPreprocessor:
     def fruit_ids(self, df: pd.DataFrame) -> List[str]:
         return make_fruit_id(df, id_col=self.id_col)
 
-    def check_no_overlap(self, df: pd.DataFrame, name: str = "dữ liệu") -> bool:
-        """Kiểm tra chống rò rỉ dữ liệu giữa Train và Val/Test."""
+    def check_no_overlap(self, df: pd.DataFrame, name: str = "data") -> bool:
+        """Check for zero data leakage between Train and Val/Test."""
         if self.fit_ids_ is None:
-            raise RuntimeError("Chưa fit hoặc lúc fit df không có cột id: không kiểm tra được.")
+            raise RuntimeError("Not fitted yet or fit dataframe lacked ID column: cannot check overlap.")
         dup = sorted(set(self.fruit_ids(df)) & set(self.fit_ids_))
         if dup:
-            raise ValueError(f"{name} chứa {len(dup)} quả đã dùng để fit scaler: {dup[:5]}...")
+            raise ValueError(f"{name} contains {len(dup)} fruits already used to fit scaler: {dup[:5]}...")
         return True
 
     def _check_columns(self, df: pd.DataFrame) -> None:
         missing_cols = [c for c in self.feature_cols if c not in df.columns]
         if missing_cols:
-            raise KeyError(f"Thiếu các cột đặc trưng trong dữ liệu: {missing_cols}")
+            raise KeyError(f"Missing feature columns in data: {missing_cols}")
 
     def fill_missing(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Điền NaN bằng median của Train."""
+        """Impute NaNs using Train medians."""
         if self.medians_ is None:
-            raise RuntimeError("Chưa fit: hãy gọi fit_scaler(train_df) trước.")
+            raise RuntimeError("Not fitted yet: call fit_scaler(train_df) first.")
         self._check_columns(df)
         return df[self.feature_cols].astype(float).fillna(self.medians_)
 
     def missing_mask(self, df: pd.DataFrame) -> np.ndarray:
-        """Ma trận cờ missing (1 = ô gốc bị NaN), shape [N, F], float32."""
+        """Binary missingness mask matrix (1 = originally NaN), shape [N, F], float32."""
         self._check_columns(df)
         return df[self.feature_cols].astype(float).isna().values.astype(np.float32)
 
     def _prepare(self, df: pd.DataFrame) -> pd.DataFrame:
         x = self.fill_missing(df)
-        # Biến đổi log1p cho các cột lệch phải
+        # Apply log1p transform to right-skewed columns
         for c in self.log_cols:
             if (x[c] < 0).any():
-                warnings.warn(f"Cột {c} có giá trị âm, sẽ bị clip về 0 trước log1p.")
+                warnings.warn(f"Column {c} contains negative values; clipping to 0 before log1p.")
             x[c] = np.log1p(x[c].clip(lower=0))
             
-        # Kẹp giá trị ngoại lai (Winsorization) nếu được bật
+        # Outlier clipping (Winsorization) if enabled
         if self.clip_outliers and self.lower_bounds_ is not None and self.upper_bounds_ is not None:
             x = x.clip(lower=self.lower_bounds_, upper=self.upper_bounds_, axis=1)
             
         return x
 
     def fit_scaler(self, train_df: pd.DataFrame, expected_n: Optional[int] = None) -> "SensorPreprocessor":
-        """Fit median + bounds + scaler CHỈ trên tập Train."""
+        """Fit medians + bounds + scaler ONLY on the Train split."""
         if expected_n is not None and len(train_df) != expected_n:
-            raise ValueError(f"Số mẫu fit = {len(train_df)} khác kỳ vọng {expected_n}: "
-                             "kiểm tra có đang truyền nhầm tập Train không.")
+            raise ValueError(f"Fit sample count = {len(train_df)} differs from expected {expected_n}: "
+                             "verify you are passing the Train split.")
         self._check_columns(train_df)
         
-        # 1. Tính Median điền khuyết
+        # 1. Compute medians for imputation
         medians = train_df[self.feature_cols].astype(float).median()
         if medians.isna().any():
             bad = list(medians[medians.isna()].index)
-            raise ValueError(f"Cột toàn NaN ở Train, không tính được median: {bad}")
+            raise ValueError(f"Columns are entirely NaN in Train; cannot compute median: {bad}")
         self.medians_ = medians
         
-        # 2. Tính ngưỡng ngoại lai nếu bật clip_outliers
+        # 2. Compute outlier quantile bounds if clip_outliers is enabled
         if self.clip_outliers:
             q_low, q_high = self.quantile_range
             prep_temp = train_df[self.feature_cols].astype(float).fillna(self.medians_)
@@ -429,7 +448,7 @@ class SensorPreprocessor:
             self.lower_bounds_ = prep_temp.quantile(q_low)
             self.upper_bounds_ = prep_temp.quantile(q_high)
             
-        # 3. Khởi tạo và fit scaler
+        # 3. Initialize and fit scaler
         if self.scaler_type == "robust":
             self.scaler = RobustScaler().fit(self._prepare(train_df).values)
         else:
@@ -445,35 +464,35 @@ class SensorPreprocessor:
         return self.fit_scaler(train_df, expected_n=expected_n)
 
     def transform(self, df: pd.DataFrame) -> np.ndarray:
-        """Chuyển đổi dữ liệu sang numpy ndarray float32."""
+        """Transform data to a float32 numpy ndarray."""
         if self.scaler is None:
-            raise RuntimeError("Chưa fit scaler: hãy gọi fit_scaler(train_df) trước.")
+            raise RuntimeError("Scaler not fitted: call fit_scaler(train_df) first.")
         x = self.scaler.transform(self._prepare(df).values).astype(np.float32)
         if self.add_missing_mask:
             x = np.concatenate([x, self.missing_mask(df)], axis=1)
         if not np.isfinite(x).all():
-            raise ValueError("Đầu ra có NaN/Inf, kiểm tra lại dữ liệu đầu vào.")
+            raise ValueError("Output contains NaN/Inf; check input data.")
         return x
 
     def fit_transform(self, train_df: pd.DataFrame, expected_n: Optional[int] = None) -> np.ndarray:
         return self.fit_scaler(train_df, expected_n=expected_n).transform(train_df)
 
     def to_tensor(self, df: pd.DataFrame, return_ids: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, List[str]]]:
-        """Trả về Tensor float32 [N, num_features]."""
+        """Return float32 Tensor [N, num_features]."""
         t = torch.from_numpy(self.transform(df))
         return (t, self.fruit_ids(df)) if return_ids else t
 
     def encode_labels(self, df_or_series: Union[pd.DataFrame, pd.Series]) -> torch.Tensor:
-        """Mã hóa nhãn sang chỉ số số nguyên [N] (torch.long)."""
+        """Encode string labels to integer class indices [N] (torch.long)."""
         s = (df_or_series[self.label_col]
              if isinstance(df_or_series, pd.DataFrame) else df_or_series)
         y = s.astype(str).str.strip().map(self.label_map)
         if y.isna().any():
-            raise ValueError(f"Nhãn lạ không xác định: {sorted(set(s[y.isna()]))}")
+            raise ValueError(f"Unknown label values encountered: {sorted(set(s[y.isna()]))}")
         return torch.tensor(y.values, dtype=torch.long)
 
     def save(self, path: Union[str, Path]) -> None:
-        """Lưu preprocessor ra file joblib."""
+        """Save preprocessor state to a joblib file."""
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         joblib.dump({
             "feature_cols": self.feature_cols,
@@ -496,7 +515,7 @@ class SensorPreprocessor:
 
     @classmethod
     def load(cls, path: Union[str, Path]) -> "SensorPreprocessor":
-        """Nạp preprocessor từ file joblib."""
+        """Load preprocessor state from a joblib file."""
         d = joblib.load(path)
         obj = cls(
             feature_cols=d["feature_cols"],
@@ -520,10 +539,10 @@ class SensorPreprocessor:
 
 
 # ------------------------------------------------------------------------------
-# 6. PYTORCH DATASET CHO NHÁNH CẢM BIẾN
+# 6. PYTORCH DATASET FOR SENSOR MODALITY
 # ------------------------------------------------------------------------------
 class SensorDataset(Dataset):
-    """PyTorch Dataset nạp dữ liệu cảm biến (Tabular / Integrated)."""
+    """PyTorch Dataset for loading sensor data (Tabular / Integrated)."""
 
     def __init__(
         self,
@@ -553,13 +572,13 @@ class SensorDataset(Dataset):
 
 
 # ------------------------------------------------------------------------------
-# 7. MẠNG MLP SENSOR BACKBONE PHỤC VỤ UNIMODAL & TEACHER FUSION
+# 7. MLP SENSOR BACKBONE FOR UNIMODAL & TEACHER FUSION
 # ------------------------------------------------------------------------------
 class SensorBackbone(nn.Module):
-    """Mạng MLP trích xuất đặc trưng cảm biến f_sensor in R^{latent_dim}.
+    """MLP network extracting sensor feature vector f_sensor in R^{latent_dim}.
     
-    Sử dụng LayerNorm để đảm bảo tính ổn định tuyệt đối khi kích thước batch nhỏ
-    hoặc khi đánh giá từng mẫu đơn lẻ (batch_size=1).
+    Uses LayerNorm to ensure complete stability on small batch sizes
+    or single-sample inference (batch_size=1).
     """
 
     def __init__(
@@ -590,11 +609,11 @@ class SensorBackbone(nn.Module):
         self.classifier = nn.Linear(latent_dim, num_classes)
 
     def forward(self, x: torch.Tensor, return_latent: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
-        """Trả về logits (phân loại đơn phương thức) hoặc vector đặc trưng ẩn f_sensor."""
+        """Return classification logits or (logits, latent f_sensor)."""
         feat = self.encoder(x)
         logits = self.classifier(feat)
         return (logits, feat) if return_latent else logits
 
     def extract_features(self, x: torch.Tensor) -> torch.Tensor:
-        """Trích xuất vector biểu diễn f_sensor in R^{latent_dim} cho Multimodal Fusion."""
+        """Extract feature representation f_sensor in R^{latent_dim} for Multimodal Fusion."""
         return self.encoder(x)

@@ -1,4 +1,4 @@
-"""Các kiến trúc mạng nơ-ron (Backbones, Fusion & Teacher/Student Models)."""
+"""Neural network architectures (Backbones, Fusion, and Teacher/Student Models)."""
 
 from src.models.audio_backbone import AudioBackbone
 from src.models.sensor_backbone import SensorBackbone

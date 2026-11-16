@@ -1,26 +1,26 @@
-"""Huấn luyện Vision-Only Student bằng Chưng cất tri thức Liên phương thức (Giai đoạn 2 - CMKD).
+"""Train the Vision-Only Student via Cross-Modal Knowledge Distillation (Stage 2 - CMKD).
 
-Phụ trách: Leader / Member 1 (Vision Lead & Multi-Modal Framework)
-Tham chiếu đặc tả: `specification/Đặc tả đề tài.pdf` (Mục 1.3.3 & Mục 1.4) và `tmp_student.md`.
+Responsible: Leader / Member 1 (Vision Lead & Multi-Modal Framework)
+Specification reference: `specification/project_specification.pdf` (Sections 1.3.3 & 1.4) and `tmp_student.md`.
 
-Cơ chế huấn luyện (Giai đoạn 2):
-1. Мо hình Multi-Modal Teacher (`best_teacher.pth`) được nạp và ĐÓNG BĂNG HOÀN TOÀN (`eval()`, `requires_grad=False`).
-2. Với mỗi mẫu thuộc `MultimodalDataset` (lọc các mẫu có ảnh RGB thật):
-   - Teacher nhận `(img, audio, sensor)` -> trích xuất `(logits_teacher, f_mm_teacher)` trong `torch.no_grad()`.
-   - Student CHỈ NHẬN `img` -> sinh ra `(logits_student, f_img_student, f_proj_student)`.
-3. Tối ưu hóa Student bằng hàm mất mát tổng hợp 3 thành phần (`CrossModalDistillationLoss`):
+Training pipeline (Stage 2):
+1. Load the converged Multi-Modal Teacher (`best_teacher.pth`) and COMPLETELY FREEZE it (`eval()`, `requires_grad=False`).
+2. For each sample in `MultimodalDataset` (filtered to samples with real RGB images):
+   - Teacher receives `(img, audio, sensor)` -> extracts `(logits_teacher, f_mm_teacher)` inside `torch.no_grad()`.
+   - Student RECEIVES ONLY `img` -> outputs `(logits_student, f_img_student, f_proj_student)`.
+3. Optimize Student using the 3-component composite distillation loss (`CrossModalDistillationLoss`):
    L_total = alpha * L_CE(y, z_student)
            + beta  * L_KD(z_student, z_teacher; T)
            + gamma * L_feat(phi(f_img_student), f_mm_teacher)
-4. Chiến lược 2 pha chống vỡ đặc trưng Pretrained:
-   - Pha 1 (Warm-up Freeze, mặc định 3 epoch): đóng băng VisionBackbone của Student, chỉ huấn luyện
-     ProjectionHead phi(.) và Classifier để làm quen với không gian f_mm của Teacher.
-   - Pha 2 (Joint Fine-tuning với Differential LR): mở khóa toàn mạng Student (Backbone LR 1e-4,
-     Head LR 5e-4) kèm Cosine Annealing và Early Stopping.
-5. Khi Validate và Test: Student hoàn toàn độc lập, CHỈ DÙNG ẢNH RGB (`ImageDataset`), không cần
-   Teacher, không cần micro và không cần cảm biến.
+4. Two-phase training strategy to protect pretrained representations:
+   - Phase 1 (Warm-up Freeze, default 3 epochs): freeze Student's VisionBackbone; train only
+     ProjectionHead phi(.) and Classifier to align with Teacher's f_mm space.
+   - Phase 2 (Joint Fine-tuning with Differential LR): unfreeze full Student network (Backbone LR 1e-4,
+     Head LR 5e-4) with Cosine Annealing and Early Stopping.
+5. During Validation and Test: Student runs completely standalone, USING ONLY RGB IMAGES (`ImageDataset`),
+   requiring neither Teacher, microphone, nor sensors.
 
-Cách chạy (từ thư mục gốc dự án):
+Usage (from project root):
     python workspaces/member1_vision_lead/04_train_teacher_and_student/train_student.py --smoke
     python workspaces/member1_vision_lead/04_train_teacher_and_student/train_student.py --eval-test
 """
@@ -86,82 +86,82 @@ TEACHER_CKPT_CANDIDATES = [
 
 
 # ------------------------------------------------------------------------------
-# 1. Tham số dòng lệnh
+# 1. Command-line arguments
 # ------------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Huấn luyện Vision-Only Student bằng CMKD (Giai đoạn 2)")
-    # Dữ liệu & Đường dẫn
+    p = argparse.ArgumentParser(description="Train Vision-Only Student via CMKD (Stage 2)")
+    # Data & Paths
     p.add_argument("--manifest", default="data/final/final_multimodal_manifest.csv")
     p.add_argument("--data-dir", default="data/final")
     p.add_argument("--sensor-cache-dir", default=str(SENSOR_RESULTS_DIR))
     p.add_argument("--sensor-preprocessor", default=str(SENSOR_PREPROCESSOR_PATH))
     p.add_argument("--teacher-ckpt", default="checkpoints/teachermodal/best_teacher.pth",
-                   help="Đường dẫn checkpoint best_teacher.pth đã huấn luyện ở Giai đoạn 1B")
+                   help="Path to best_teacher.pth checkpoint trained in Stage 1B")
     p.add_argument("--init-vision-ckpt", default=None,
-                   help="Tùy chọn: nạp khởi tạo từ best_vision_unimodal.pth nếu dùng cùng kiến trúc")
+                   help="Optional: initialize from best_vision_unimodal.pth if architecture matches")
     p.add_argument("--save-path", default="checkpoints/studentmodal/best_student.pth")
     p.add_argument("--results-dir",
                    default="workspaces/member1_vision_lead/04_train_teacher_and_student/results_student")
 
-    # Kiến trúc Student
+    # Student architecture
     p.add_argument("--student-backbone", default="convnextv2_tiny",
-                   help="Backbone của Student: convnextv2_tiny (mặc định, ~28M), convnextv2_nano, convnextv2_base, resnet18...")
+                   help="Student backbone: convnextv2_tiny (default, ~28M), convnextv2_nano, convnextv2_base, resnet18...")
     p.add_argument("--no-pretrained", action="store_true",
-                   help="Tắt tải trọng số ImageNet pretrained khi khởi tạo Student")
+                   help="Disable loading ImageNet pretrained weights when initializing Student")
     p.add_argument("--drop-path", type=float, default=0.2)
     p.add_argument("--head-dropout", type=float, default=0.2)
     p.add_argument("--proj-hidden-dim", type=int, default=512)
 
-    # Trọng số Distillation Loss (Mục 1.3.3)
-    p.add_argument("--alpha", type=float, default=1.0, help="Trọng số L_CE (nhãn thật)")
-    p.add_argument("--beta", type=float, default=2.0, help="Trọng số L_KD (KL Divergence soft logits)")
-    p.add_argument("--gamma", type=float, default=1.0, help="Trọng số L_feat (căn chỉnh đặc trưng ẩn f_mm)")
-    p.add_argument("--temperature", type=float, default=3.0, help="Nhiệt độ làm mềm T cho L_KD")
+    # Distillation Loss weights (Section 1.3.3)
+    p.add_argument("--alpha", type=float, default=1.0, help="Weight for L_CE (hard labels)")
+    p.add_argument("--beta", type=float, default=2.0, help="Weight for L_KD (KL Divergence soft logits)")
+    p.add_argument("--gamma", type=float, default=1.0, help="Weight for L_feat (latent f_mm alignment)")
+    p.add_argument("--temperature", type=float, default=3.0, help="Softmax temperature T for L_KD")
     p.add_argument("--feat-loss-type", default="cosine", choices=["cosine", "mse", "cosine_mse"],
-                   help="Hàm đo khoảng cách L_feat giữa phi(f_img) và f_mm")
+                   help="Distance function L_feat between phi(f_img) and f_mm")
     p.add_argument("--loss-type", default="cost_sensitive_focal",
                    choices=["cost_sensitive_focal", "focal", "ce"],
-                   help="Loại hàm L_CE của Student")
+                   help="Student L_CE loss type")
     p.add_argument("--label-smoothing", type=float, default=0.05)
     p.add_argument("--focal-gamma", type=float, default=2.0)
     p.add_argument("--cost-weight", type=float, default=0.5)
     p.add_argument("--no-class-weights", action="store_true")
 
-    # Siêu tham số huấn luyện
+    # Training hyperparameters
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--warmup-epochs", type=int, default=3,
-                   help="Số epoch đầu đóng băng backbone để ổn định ProjectionHead + Classifier")
+                   help="Initial epochs to freeze backbone and stabilize ProjectionHead + Classifier")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--accum-steps", type=int, default=1)
-    p.add_argument("--lr", type=float, default=5e-4, help="LR cho ProjectionHead + Classifier")
-    p.add_argument("--lr-backbone", type=float, default=1e-4, help="LR cho VisionBackbone ở Pha 2")
+    p.add_argument("--lr", type=float, default=5e-4, help="LR for ProjectionHead + Classifier")
+    p.add_argument("--lr-backbone", type=float, default=1e-4, help="LR for VisionBackbone in Phase 2")
     p.add_argument("--min-lr", type=float, default=1e-6)
     p.add_argument("--weight-decay-head", type=float, default=1e-2)
     p.add_argument("--weight-decay-backbone", type=float, default=1e-4)
-    p.add_argument("--patience", type=int, default=10, help="Early stopping patience ở Pha 2")
+    p.add_argument("--patience", type=int, default=10, help="Early stopping patience in Phase 2")
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--select-metric", default="fruit_macro_f1",
                    choices=["sample_macro_f1", "fruit_macro_f1", "val_loss"])
 
-    # Phần cứng & Tiện ích
+    # Hardware & Utilities
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--num-workers", type=int, default=2)
     p.add_argument("--no-amp", action="store_true")
     p.add_argument("--image-size", type=int, default=384)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--resume", default=None, help="Đường dẫn last_student.pth để tiếp tục")
-    p.add_argument("--fresh", action="store_true", help="Huấn luyện mới từ Epoch 1, bỏ qua last_student.pth")
-    p.add_argument("--eval-test", action="store_true", help="Chấm tập Test độc lập sau khi chốt best Student")
-    p.add_argument("--eval-only", action="store_true", help="Chỉ chạy đánh giá từ --save-path")
+    p.add_argument("--resume", default=None, help="Path to last_student.pth to resume training")
+    p.add_argument("--fresh", action="store_true", help="Train from scratch at Epoch 1, ignoring last_student.pth")
+    p.add_argument("--eval-test", action="store_true", help="Evaluate on independent Test set after selecting best Student")
+    p.add_argument("--eval-only", action="store_true", help="Run evaluation only from --save-path")
     p.add_argument("--skip-final-eval", action="store_true")
     p.add_argument("--smoke", "--smoke-test", dest="smoke", action="store_true",
-                   help="Chạy thử nhanh 2 epoch để kiểm tra toàn bộ luồng code")
+                   help="Quick 2-epoch smoke run to verify the entire pipeline")
     p.add_argument("--max-batches", type=int, default=0)
     return p.parse_args()
 
 
 # ------------------------------------------------------------------------------
-# 2. Tiện ích
+# 2. Utilities
 # ------------------------------------------------------------------------------
 def setup_logging(results_dir: Path, smoke: bool, append: bool = False) -> None:
     results_dir.mkdir(parents=True, exist_ok=True)
@@ -184,11 +184,11 @@ def amp_settings(device: torch.device, enabled: bool):
 
 
 def filter_rgb_indices(multimodal_ds) -> List[int]:
-    """Chỉ giữ các mẫu có ảnh RGB thật trên đĩa (loại bỏ các mẫu ảnh = 0 do quả thiếu RGB)."""
+    """Keep only samples with real RGB images on disk (drop image = 0 samples from RGB-missing fruits)."""
     indices = [i for i, s in enumerate(multimodal_ds.samples) if s.get("img_path") is not None]
     if not indices:
         logger.warning(
-            "Không tìm thấy file ảnh RGB trong data_dir (chạy local/smoke chưa tải ảnh) -> dùng toàn bộ mẫu manifest."
+            "No RGB image files found in data_dir (local/smoke run without images) -> using all manifest samples."
         )
         return list(range(len(multimodal_ds)))
     return indices
@@ -201,15 +201,15 @@ def _atomic_torch_save(payload: Dict, target: Path) -> None:
 
 
 def load_frozen_teacher(args, device: torch.device) -> MultiModalTeacher:
-    """Nạp Teacher đã hội tụ ở Giai đoạn 1B và đóng băng hoàn toàn."""
+    """Load the converged Stage 1B Teacher and freeze it completely."""
     search = ([args.teacher_ckpt] if args.teacher_ckpt else []) + list(TEACHER_CKPT_CANDIDATES)
     ckpt_path = first_existing(search)
     if ckpt_path is not None:
-        logger.info(f"Nạp Frozen Teacher từ: {ckpt_path}")
+        logger.info(f"Loading Frozen Teacher from: {ckpt_path}")
         return build_teacher_from_checkpoint(ckpt_path, device=device, eval_mode=True)
 
     if args.smoke:
-        logger.warning("Chế độ --smoke: không tìm thấy best_teacher.pth, khởi tạo Teacher nhẹ để kiểm thử luồng.")
+        logger.warning("--smoke mode: best_teacher.pth not found, initializing lightweight Teacher for pipeline test.")
         t_cfg = TeacherConfig(
             vision_model_name="resnet18",
             vision_drop_path=0.0,
@@ -227,13 +227,13 @@ def load_frozen_teacher(args, device: torch.device) -> MultiModalTeacher:
         return teacher
 
     raise FileNotFoundError(
-        f"Không tìm thấy checkpoint Teacher tại {search}. "
-        "Hãy đảm bảo đã có checkpoints/teachermodal/best_teacher.pth trước khi huấn luyện Student."
+        f"Teacher checkpoint not found at {search}. "
+        "Please ensure checkpoints/teachermodal/best_teacher.pth exists before training Student."
     )
 
 
 # ------------------------------------------------------------------------------
-# 3. Vòng lặp Train (Distillation) & Validate (Vision-Only)
+# 3. Training (Distillation) & Validation (Vision-Only) loops
 # ------------------------------------------------------------------------------
 def train_one_epoch(
     student: VisionStudent,
@@ -318,7 +318,7 @@ def validate_student(
     amp_dtype: torch.dtype,
     max_batches: int = 0,
 ) -> Dict[str, float]:
-    """Đánh giá Student trên tập Val CHỈ VỚI ẢNH RGB (không dùng Teacher, Audio hay Sensor)."""
+    """Evaluate Student on Val USING ONLY RGB IMAGES (no Teacher, Audio, or Sensor)."""
     student.eval()
     probs_all, y_all, fids = [], [], []
     for step, batch in enumerate(loader):
@@ -365,16 +365,16 @@ def plot_student_history(history: pd.DataFrame, warmup_epochs: int, path: Path) 
     fig, axes = plt.subplots(1, 3, figsize=(17, 4.5))
     axes[0].plot(history["epoch"], history["train_loss"], "o-", label="train total")
     axes[0].plot(history["epoch"], history["val_loss"], "o-", label="val NLL")
-    axes[0].set_title("Tổng hợp Loss (Train vs Val)")
+    axes[0].set_title("Total Loss (Train vs Val)")
 
     axes[1].plot(history["epoch"], history["train_loss_ce"], "o-", label="L_CE (Hard)")
     axes[1].plot(history["epoch"], history["train_loss_kd"], "o-", label="L_KD (Soft Logits)")
     axes[1].plot(history["epoch"], history["train_loss_feat"], "o-", label="L_feat (Latent f_mm)")
-    axes[1].set_title("Các thành phần Distillation Loss")
+    axes[1].set_title("Distillation Loss Components")
 
     axes[2].plot(history["epoch"], history["sample_macro_f1"], "o-", label="val sample Macro-F1")
     axes[2].plot(history["epoch"], history["fruit_macro_f1"], "o-", label="val fruit Macro-F1")
-    axes[2].set_title("Macro-F1 trên Validation (RGB-Only)")
+    axes[2].set_title("Validation Macro-F1 (RGB-Only)")
 
     for ax in axes:
         if warmup_epochs > 0:
@@ -382,7 +382,7 @@ def plot_student_history(history: pd.DataFrame, warmup_epochs: int, path: Path) 
         ax.set_xlabel("epoch")
         ax.grid(alpha=0.3)
         ax.legend()
-    fig.suptitle("Vision-Only Student (CMKD Giai đoạn 2)")
+    fig.suptitle("Vision-Only Student (CMKD Stage 2)")
     fig.tight_layout()
     fig.savefig(path, dpi=130)
     plt.close(fig)
@@ -412,14 +412,14 @@ def main() -> None:
     amp_on, amp_dtype = amp_settings(device, not args.no_amp)
 
     logger.info("=" * 78)
-    logger.info("HUẤN LUYỆN VISION-ONLY STUDENT BẰNG CMKD (GIAI ĐOẠN 2)")
-    logger.info(f"Thiết bị: {device} | AMP: {amp_on} ({amp_dtype}) | batch {args.batch_size} x accum {args.accum_steps}")
+    logger.info("TRAINING VISION-ONLY STUDENT VIA CMKD (STAGE 2)")
+    logger.info(f"Device: {device} | AMP: {amp_on} ({amp_dtype}) | batch {args.batch_size} x accum {args.accum_steps}")
     logger.info(f"Student backbone : {resolve_student_backbone_name(args.student_backbone)}")
     logger.info(f"Distill weights  : alpha={args.alpha} (CE) | beta={args.beta} (KD, T={args.temperature}) | gamma={args.gamma} (Feat: {args.feat_loss_type})")
     logger.info(f"Best student ckpt: {save_path}")
     logger.info("=" * 78)
 
-    # ---- Chế độ chỉ đánh giá (--eval-only) -------------------------------------
+    # ---- Eval-only mode (--eval-only) ------------------------------------------
     if args.eval_only:
         res_val = evaluate_student_split(
             save_path, args.manifest, args.data_dir, "valid", results_dir,
@@ -438,12 +438,12 @@ def main() -> None:
                 generate_benchmark_comparison(results_dir)
         return
 
-    # ---- 1. Nạp Frozen Teacher -------------------------------------------------
+    # ---- 1. Load Frozen Teacher ------------------------------------------------
     teacher = load_frozen_teacher(args, device)
     latent_dim_mm = int(teacher.config.latent_dim_mm)
 
-    # ---- 2. Xây dựng Datasets --------------------------------------------------
-    # Train cần MultimodalDataset (để Teacher có cả img + audio + sensor), lọc các mẫu có ảnh RGB thật
+    # ---- 2. Build Datasets -----------------------------------------------------
+    # Train requires MultimodalDataset (so Teacher gets img + audio + sensor), filtered to samples with real RGB images
     mm_datasets = build_multimodal_datasets(
         resolve_path(args.manifest),
         resolve_path(args.data_dir),
@@ -458,7 +458,7 @@ def main() -> None:
     train_labels = [full_train_ds.samples[i]["label"] for i in rgb_train_indices]
     train_ds = Subset(full_train_ds, rgb_train_indices)
 
-    # Val chỉ dùng ImageDataset (RGB-Only) đúng như điều kiện thực tế của Student
+    # Val uses ImageDataset only (RGB-Only), matching Student's deployment conditions
     val_ds = build_vision_eval_dataset(args.manifest, args.data_dir, split="valid", image_size=args.image_size)
     logger.info(f"[data] Train RGB samples: {len(train_ds)} | Val RGB samples: {len(val_ds)}")
 
@@ -473,7 +473,7 @@ def main() -> None:
         persistent_workers=args.num_workers > 0, drop_last=False,
     )
 
-    # ---- 3. Khởi tạo VisionStudent ---------------------------------------------
+    # ---- 3. Initialize VisionStudent -------------------------------------------
     s_cfg = StudentConfig(
         backbone_name=args.student_backbone,
         pretrained=not args.no_pretrained,
@@ -486,9 +486,9 @@ def main() -> None:
     student = VisionStudent(s_cfg, vision_ckpt=resolve_path(args.init_vision_ckpt) if args.init_vision_ckpt else None)
     student.to(device)
     n_params = sum(p.numel() for p in student.parameters())
-    logger.info(f"Student: {n_params / 1e6:.1f}M tham số | f_img = {student.feat_dim} -> f_proj = {latent_dim_mm}")
+    logger.info(f"Student: {n_params / 1e6:.1f}M params | f_img = {student.feat_dim} -> f_proj = {latent_dim_mm}")
 
-    # ---- 4. Hàm mất mát Chưng cất 3 thành phần ---------------------------------
+    # ---- 4. 3-Component Distillation Loss --------------------------------------
     class_w = None if args.no_class_weights else compute_class_weights(train_labels, len(CLASS_ORDER))
     if class_w is not None:
         logger.info(f"Class weights (Train RGB): {dict(zip(CLASS_ORDER, class_w.numpy().round(3)))}")
@@ -534,7 +534,7 @@ def main() -> None:
         best = dict(resume_state.get("best", {}))
         bad_epochs = int(resume_state.get("bad_epochs", 0))
         start_epoch = int(resume_state.get("epoch", 0)) + 1
-        logger.info(f"Đã khôi phục từ {last_path} (xong epoch {start_epoch - 1}/{args.epochs})")
+        logger.info(f"Resumed from {last_path} (finished epoch {start_epoch - 1}/{args.epochs})")
 
     phase2_epochs = max(args.epochs - args.warmup_epochs, 0)
     prefix = "smoke_" if args.smoke else ""
@@ -571,7 +571,7 @@ def main() -> None:
                 ),
                 save_path,
             )
-            logger.info(f"  -> Lưu best Student ({args.select_metric} = {row[args.select_metric]:.4f}): {save_path}")
+            logger.info(f"  -> Saved best Student ({args.select_metric} = {row[args.select_metric]:.4f}): {save_path}")
             return True
         return False
 
@@ -596,9 +596,9 @@ def main() -> None:
         hist_df.to_csv(results_dir / f"{prefix}history.csv", index=False)
         plot_student_history(hist_df, args.warmup_epochs, results_dir / f"{prefix}training_curves.png")
 
-    # ---- PHA 1: WARM-UP FREEZE -------------------------------------------------
+    # ---- PHASE 1: WARM-UP FREEZE -----------------------------------------------
     if args.warmup_epochs > 0 and start_epoch <= args.warmup_epochs:
-        logger.info(f">>> PHA 1 - WARM-UP FREEZE (epoch {start_epoch}..{args.warmup_epochs}): đóng băng VisionBackbone")
+        logger.info(f">>> PHASE 1 - WARM-UP FREEZE (epoch {start_epoch}..{args.warmup_epochs}): freezing VisionBackbone")
         student.freeze_backbone()
         opt1 = torch.optim.AdamW(student.param_groups(0.0, args.lr, head_wd=args.weight_decay_head))
         if resume_state and resume_state.get("phase") == "phase1" and resume_state.get("optimizer_state_dict"):
@@ -609,11 +609,11 @@ def main() -> None:
             save_last_state(row, opt1)
         del opt1
 
-    # ---- PHA 2: JOINT FINE-TUNING ----------------------------------------------
+    # ---- PHASE 2: JOINT FINE-TUNING --------------------------------------------
     p2_start = max(start_epoch, args.warmup_epochs + 1)
     if phase2_epochs > 0 and p2_start <= args.epochs and bad_epochs < args.patience:
         logger.info(
-            f">>> PHA 2 - JOINT DISTILLATION (epoch {p2_start}..{args.epochs}): "
+            f">>> PHASE 2 - JOINT DISTILLATION (epoch {p2_start}..{args.epochs}): "
             f"backbone LR {args.lr_backbone}, head LR {args.lr}"
         )
         student.unfreeze_all()
@@ -640,7 +640,7 @@ def main() -> None:
                 bad_epochs += 1
             save_last_state(row, opt2, sched)
             if bad_epochs >= args.patience:
-                logger.info(f"Early stopping sau {args.patience} epoch không cải thiện.")
+                logger.info(f"Early stopping after {args.patience} epochs without improvement.")
                 break
 
     if history:
@@ -654,12 +654,12 @@ def main() -> None:
             f"fruit F1 {best['fruit_macro_f1']:.4f} | val loss {best['val_loss']:.4f}"
         )
 
-    # ---- Đánh giá cuối (RGB-Only) ----------------------------------------------
+    # ---- Final evaluation (RGB-Only) -------------------------------------------
     if not args.skip_final_eval:
         del student, teacher, train_loader, val_loader
         if device.type == "cuda":
             torch.cuda.empty_cache()
-        logger.info(">>> Đánh giá độc lập best Student trên Val (chỉ dùng ảnh RGB) ...")
+        logger.info(">>> Independent evaluation of best Student on Val (RGB-only) ...")
         res_val = evaluate_student_split(
             save_path, args.manifest, args.data_dir, "valid", results_dir,
             batch_size=args.batch_size, num_workers=args.num_workers,
@@ -672,7 +672,7 @@ def main() -> None:
             f"fruit F1 {res_val['metrics']['fruit_macro_f1']:.4f}"
         )
         if args.eval_test:
-            logger.info(">>> Đánh giá độc lập best Student trên Test (chỉ dùng ảnh RGB) ...")
+            logger.info(">>> Independent evaluation of best Student on Test (RGB-only) ...")
             res_test = evaluate_student_split(
                 save_path, args.manifest, args.data_dir, "test", results_dir,
                 batch_size=args.batch_size, num_workers=args.num_workers,
@@ -687,9 +687,9 @@ def main() -> None:
             if not args.smoke:
                 comp_df = generate_benchmark_comparison(results_dir)
                 if comp_df is not None:
-                    logger.info(f"Đã xuất bảng đối sánh: {results_dir / 'benchmark_comparison.md'}")
+                    logger.info(f"Exported benchmark comparison table: {results_dir / 'benchmark_comparison.md'}")
 
-    logger.info("HOÀN TẤT HUẤN LUYỆN VISION-ONLY STUDENT.")
+    logger.info("VISION-ONLY STUDENT TRAINING COMPLETE.")
 
 
 if __name__ == "__main__":

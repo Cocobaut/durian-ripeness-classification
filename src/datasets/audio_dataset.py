@@ -1,12 +1,12 @@
-"""Dataset & tiền xử lý nhánh Âm thanh gõ (Knock Sound -> log-Mel).
+"""Dataset & preprocessing for the Acoustic Knock Sound modality (Knock Sound -> log-Mel).
 
-Dự án: Phân loại độ chín sầu riêng bằng Chưng cất tri thức Đa phương thức (CMKD)
+Project: Durian Ripeness Classification via Cross-Modal Knowledge Distillation (CMKD)
 
-Tái sử dụng NGUYÊN `AudioPreprocessor` của Member 2
-(workspaces/member2_audio/01_eda_and_preprocess_audio/preprocess_audio.py) để đầu vào
-giống hệt lúc huấn luyện backbone ResNet-18 âm thanh: log-Mel [1, 64, 306] (6 tiếng gõ x 0.5 s).
+Reuses Member 2's exact `AudioPreprocessor`
+(workspaces/member2_audio/01_eda_and_preprocess_audio/preprocess_audio.py) so the input
+matches what the ResNet-18 audio backbone was trained on: log-Mel [1, 64, 306] (6 knocks x 0.5 s).
 
-Tên file chuẩn của data/final/{split}/sound: `durian_XXX_{android|iphone}_{Ripeness}_knock[_k].wav`.
+Standard filename format in data/final/{split}/sound: `durian_XXX_{android|iphone}_{Ripeness}_knock[_k].wav`.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ AUDIO_FILE_PATTERN = re.compile(
 
 
 def list_audio_files(sound_dir: Union[str, Path]) -> pd.DataFrame:
-    """Liệt kê file âm thanh của một split: cột [path, file, fruit_id, device]."""
+    """List audio files in a split: columns [path, file, fruit_id, device]."""
     sound_dir = Path(sound_dir)
     rows = []
     if sound_dir.is_dir():
@@ -45,14 +45,14 @@ def list_audio_files(sound_dir: Union[str, Path]) -> pd.DataFrame:
 
 
 def build_audio_preprocessor(seed: int = 42) -> AudioPreprocessor:
-    """AudioPreprocessor với cấu hình mặc định = cấu hình đã train backbone âm thanh."""
+    """Create AudioPreprocessor with the default config matching the trained audio backbone."""
     return AudioPreprocessor(random_state=seed)
 
 
 class AudioKnockBank:
-    """Cắt sẵn tiếng gõ của mọi file một lần (bước tốn thời gian nhất) và giữ trong RAM.
+    """Pre-extract knock segments for every file once (most expensive step) and cache in RAM.
 
-    Mỗi lần lấy mẫu chỉ còn bước chọn K tiếng gõ + log-Mel (+ SpecAugment khi train).
+    Each sampling step only needs to select K knocks + compute log-Mel (+ SpecAugment during training).
     """
 
     def __init__(self, files: pd.DataFrame, preprocessor: AudioPreprocessor):
@@ -75,7 +75,7 @@ class AudioKnockBank:
 
 
 class AudioDataset(Dataset):
-    """Dataset âm thanh đơn phương thức: (mel [1, 64, T], label, fruit_id, {"device": ...})."""
+    """Unimodal audio dataset: (mel [1, 64, T], label, fruit_id, {"device": ...})."""
 
     def __init__(self, bank: AudioKnockBank, label_map: Dict[str, int], train: bool = False, seed: int = 42):
         self.bank = bank

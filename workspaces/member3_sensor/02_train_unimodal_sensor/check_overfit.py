@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""Kiểm tra overfit của checkpoint chính thức: so sánh Train / Val / Test.
+"""Check overfitting of the official checkpoint: compare Train / Val / Test.
 
-Chạy từ thư mục gốc repo (đã kích hoạt môi trường):
+Run from the repository root (with virtual environment activated):
     python workspaces/member3_sensor/02_train_unimodal_sensor/check_overfit.py
 """
 import sys
@@ -43,18 +43,18 @@ for split in ("train", "valid", "test"):
     rows.append((split, len(df), accuracy_score(y.numpy(), pred), f1_score(y.numpy(), pred, average="macro"),
                  F.cross_entropy(logits, y).item()))
 
-print(f"\nCheckpoint: {ck_path.name} | bộ đặc trưng: {ck['feature_set']} | seed {ck['seed']}")
-print(f"{'tập':<7}{'số quả':>8}{'accuracy':>11}{'macro-F1':>11}{'CE loss':>10}")
+print(f"\nCheckpoint: {ck_path.name} | feature set: {ck['feature_set']} | seed {ck['seed']}")
+print(f"{'split':<7}{'fruits':>8}{'accuracy':>11}{'macro-F1':>11}{'CE loss':>10}")
 for s, n, a, f, l in rows:
     print(f"{s:<7}{n:>8}{a:>11.3f}{f:>11.3f}{l:>10.3f}")
 
 tr, va, te = rows
-print(f"\nChênh Train - Val  : accuracy {tr[2] - va[2]:+.3f} | F1 {tr[3] - va[3]:+.3f}")
-print(f"Chênh Train - Test : accuracy {tr[2] - te[2]:+.3f} | F1 {tr[3] - te[3]:+.3f}")
+print(f"\nGap Train - Val  : accuracy {tr[2] - va[2]:+.3f} | F1 {tr[3] - va[3]:+.3f}")
+print(f"Gap Train - Test : accuracy {tr[2] - te[2]:+.3f} | F1 {tr[3] - te[3]:+.3f}")
 gap = tr[3] - te[3]
 if gap > 0.25:
-    print("=> Overfit RÕ: Train cao hơn Test nhiều. Cần giảm độ phức tạp hoặc tăng regularization.")
+    print("=> CLEAR Overfit: Train is much higher than Test. Consider reducing model complexity or increasing regularization.")
 elif gap > 0.10:
-    print("=> Overfit NHẸ: bình thường với 132 mẫu. Early stopping và regularization đang giữ được.")
+    print("=> SLIGHT Overfit: normal for 132 samples. Early stopping and regularization are keeping it in check.")
 else:
-    print("=> Gần như không overfit (hoặc mô hình đang underfit nếu cả hai đều thấp).")
+    print("=> Virtually no overfitting (or underfitting if both splits are low).")

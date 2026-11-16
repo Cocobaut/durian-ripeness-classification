@@ -1,6 +1,6 @@
-"""Kiểm thử toàn diện cho nhánh Multi-Modal Teacher (Dataset, Loss, Backbones, Fusion, Eval).
+"""Comprehensive tests for Multi-Modal Teacher & Student (Dataset, Loss, Backbones, Fusion, Eval).
 
-Chạy từ thư mục gốc dự án:
+Run from project root:
     python -m pytest workspaces/member1_vision_lead/04_train_teacher_and_student/tests -q
 """
 
@@ -59,7 +59,7 @@ def test_classification_loss_and_weights():
     assert loss.item() > 0
     assert logits.grad is not None
 
-    # Kiểm tra tính chất Cost-Sensitive: nhầm Overripe thành Unripe (cách 2 nấc) phải bị phạt nặng hơn nhầm thành Ripe (cách 1 nấc)
+    # Verify Cost-Sensitive property: confusing Overripe as Unripe (2 steps away) must incur higher loss than Ripe (1 step away)
     crit_pure_cost = DurianClassificationLoss(
         class_weights=None,
         label_smoothing=0.0,
@@ -68,11 +68,11 @@ def test_classification_loss_and_weights():
         cost_weight=1.0,
     )
     target_overripe = torch.tensor([2])
-    logits_pred_unripe = torch.tensor([[10.0, 0.0, 0.0]])  # đoán Unripe khi thật là Overripe
-    logits_pred_ripe = torch.tensor([[0.0, 10.0, 0.0]])    # đoán Ripe khi thật là Overripe
+    logits_pred_unripe = torch.tensor([[10.0, 0.0, 0.0]])  # predict Unripe when ground truth is Overripe
+    logits_pred_ripe = torch.tensor([[0.0, 10.0, 0.0]])    # predict Ripe when ground truth is Overripe
     loss_unripe = crit_pure_cost(logits_pred_unripe, target_overripe)
     loss_ripe = crit_pure_cost(logits_pred_ripe, target_overripe)
-    assert loss_unripe > loss_ripe, "Nhầm Unripe <-> Overripe phải có loss cao hơn nhầm Ripe <-> Overripe"
+    assert loss_unripe > loss_ripe, "Confusing Unripe <-> Overripe must yield higher loss than Ripe <-> Overripe"
 
 
 def test_sensor_pipeline_on_real_manifest():
@@ -97,7 +97,7 @@ def test_image_clahe_and_transforms():
 
 
 def test_multimodal_dataset_direct_init():
-    # Kiểm tra khởi tạo trực tiếp theo đúng cú pháp trong tmp.md
+    # Verify direct initialization syntax
     ds = MultimodalDataset(
         PROJECT_ROOT / "data" / "final" / "final_multimodal_manifest.csv",
         PROJECT_ROOT / "data" / "final",
@@ -117,7 +117,7 @@ def test_multimodal_dataset_direct_init():
 
 def test_teacher_two_phase_and_checkpoint_and_eval(tmp_path):
     cfg = TeacherConfig(
-        vision_model_name="resnet18",  # dùng backbone nhẹ trong unit test để chạy tức thì trên CPU
+        vision_model_name="resnet18",  # use lightweight backbone in unit test for instant CPU execution
         vision_drop_path=0.0,
         vision_dim=512,
         audio_dim=512,
@@ -129,7 +129,7 @@ def test_teacher_two_phase_and_checkpoint_and_eval(tmp_path):
     )
     model = MultiModalTeacher(cfg)
 
-    # Pha 1: đóng băng backbone
+    # Phase 1: freeze backbones
     model.freeze_backbones()
     assert not any(p.requires_grad for p in model.vision_backbone.parameters())
     assert not any(p.requires_grad for p in model.audio_backbone.parameters())
@@ -137,7 +137,7 @@ def test_teacher_two_phase_and_checkpoint_and_eval(tmp_path):
     assert all(p.requires_grad for p in model.fusion.parameters())
     assert all(p.requires_grad for p in model.classifier.parameters())
 
-    # Pha 2: mở khóa toàn mạng + differential LR
+    # Phase 2: unfreeze full network + differential LR
     model.unfreeze_all()
     groups = model.param_groups(backbone_lr=1e-5, head_lr=5e-4)
     group_lrs = {g["name"]: g["lr"] for g in groups}
@@ -149,15 +149,15 @@ def test_teacher_two_phase_and_checkpoint_and_eval(tmp_path):
     # Forward & Zero-masking
     model.eval()
     img = torch.randn(4, 3, 64, 64)
-    audio = torch.zeros(4, 1, 64, 306)  # giả lập nhánh audio bị zero-mask
+    audio = torch.zeros(4, 1, 64, 306)  # simulate zero-masked audio branch
     sensor = torch.randn(4, 21)
     logits, f_mm, details = model(img, audio, sensor, return_details=True)
     assert logits.shape == (4, 3)
     assert f_mm.shape == (4, 64)
-    # Khi audio = 0, trọng số cổng của audio phải bằng 0
+    # When audio = 0, audio gate weight must equal 0
     assert torch.allclose(details["gate_weights"][:, 1], torch.zeros(4))
 
-    # Lưu & nạp lại checkpoint Teacher
+    # Save & reload Teacher checkpoint
     ckpt_path = tmp_path / "best_teacher.pth"
     torch.save(teacher_checkpoint_dict(model, epoch=3, val_f1=0.85), ckpt_path)
     loaded = build_teacher_from_checkpoint(ckpt_path, device="cpu")
@@ -168,7 +168,7 @@ def test_teacher_two_phase_and_checkpoint_and_eval(tmp_path):
 
 @pytest.mark.skipif(
     not (PROJECT_ROOT / "checkpoints" / "unimodal" / "image" / "best_vision_unimodal.pth").exists(),
-    reason="Cần có đủ 3 checkpoint unimodal trong checkpoints/unimodal/",
+    reason="Requires all 3 unimodal checkpoints in checkpoints/unimodal/",
 )
 def test_load_real_unimodal_checkpoints():
     vision_ckpt = PROJECT_ROOT / "checkpoints" / "unimodal" / "image" / "best_vision_unimodal.pth"
@@ -211,13 +211,13 @@ def test_student_model_and_distillation_loss(tmp_path):
     student = VisionStudent(cfg)
     assert student.feat_dim == 512
 
-    # Pha 1: freeze backbone
+    # Phase 1: freeze backbone
     student.freeze_backbone()
     assert not any(p.requires_grad for p in student.vision_backbone.parameters())
     assert all(p.requires_grad for p in student.projection_head.parameters())
     assert all(p.requires_grad for p in student.classifier.parameters())
 
-    # Pha 2: unfreeze all + differential LR
+    # Phase 2: unfreeze all + differential LR
     student.unfreeze_all()
     groups = student.param_groups(backbone_lr=1e-4, head_lr=5e-4)
     group_lrs = {g["name"]: g["lr"] for g in groups}
@@ -245,7 +245,7 @@ def test_student_model_and_distillation_loss(tmp_path):
     assert parts["loss_kd"] >= 0
     assert parts["loss_feat"] >= 0
 
-    # Lưu & nạp checkpoint Student
+    # Save & reload Student checkpoint
     student.eval()
     ckpt_path = tmp_path / "best_student.pth"
     torch.save(student_checkpoint_dict(student, epoch=2), ckpt_path)

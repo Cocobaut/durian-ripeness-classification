@@ -1,7 +1,7 @@
-"""Backbone nhánh Thị giác: ConvNeXt V2-Base (f_img in R^1024).
+"""Vision modality backbone: ConvNeXt V2-Base (f_img in R^1024).
 
-Kiến trúc khớp `ConvNeXtV2BaseTeacherVision` của notebook unimodal vision
-(state_dict dạng `backbone.*` + `head.*`), nên nạp được trực tiếp `best_vision_unimodal.pth`.
+Architecture matches `ConvNeXtV2BaseTeacherVision` from the unimodal vision notebook
+(state_dict with `backbone.*` + `head.*`), allowing direct loading of `best_vision_unimodal.pth`.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ def _extract_state_dict(ckpt) -> dict:
 
 
 class VisionBackbone(nn.Module):
-    """ConvNeXt V2-Base bỏ classifier, trả về vector đặc trưng [B, 1024]."""
+    """ConvNeXt V2-Base without classifier, returning feature vectors [B, 1024]."""
 
     def __init__(self, model_name: str = VISION_MODEL_NAME, pretrained: bool = False,
                  drop_path_rate: float = 0.2):
@@ -38,13 +38,13 @@ class VisionBackbone(nn.Module):
         return self.backbone(x)
 
     def load_unimodal(self, ckpt_path: Union[str, Path]) -> "VisionBackbone":
-        """Nạp backbone từ checkpoint unimodal (bỏ qua `head.*`, chỉ lấy `backbone.*`)."""
+        """Load backbone weights from a unimodal checkpoint (ignores `head.*`, keeps `backbone.*`)."""
         state = _extract_state_dict(torch.load(ckpt_path, map_location="cpu", weights_only=False))
         state = {(k[7:] if k.startswith("module.") else k): v for k, v in state.items()}
         if any(k.startswith("backbone.") for k in state):
             state = {k[len("backbone."):]: v for k, v in state.items() if k.startswith("backbone.")}
         missing, unexpected = self.backbone.load_state_dict(state, strict=False)
         if missing or unexpected:
-            raise RuntimeError(f"Vision ckpt không khớp: thiếu {missing[:5]}, thừa {unexpected[:5]}")
+            raise RuntimeError(f"Vision checkpoint mismatch: missing {missing[:5]}, unexpected {unexpected[:5]}")
         return self
 
