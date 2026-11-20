@@ -103,8 +103,13 @@ def evaluate_student_split(
     smoke: bool = False,
     seed: int = 42,
     model: Optional[VisionStudent] = None,
+    tta: bool = True,
 ) -> Dict:
-    """Evaluate Multi-View VisionStudent on `valid` or `test` split using RGB image bags only."""
+    """Evaluate Multi-View VisionStudent on `valid` or `test` split using RGB image bags only.
+
+    `tta=True` applies the same per-view 3-crop/flip TTA as the unimodal Vision baseline evaluation
+    (0.5 * original + 0.3 * hflip + 0.2 * 95% zoom), so Student and baseline are compared fairly.
+    """
     ckpt_path = resolve_path(ckpt_path)
     output_dir = resolve_path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -126,6 +131,8 @@ def evaluate_student_split(
         model = build_student_from_checkpoint(ckpt_path, device=device_obj, eval_mode=True)
     else:
         model.to(device_obj).eval()
+    model.tta_enabled = bool(tta)
+    logger.info(f"Student evaluation on '{split}' | TTA: {bool(tta)}")
 
     resolved_split = split_dir_name(split)
     split_prefix = ("smoke_" if smoke else "") + ("val" if resolved_split != "test" else "test")
@@ -230,6 +237,25 @@ def generate_benchmark_comparison(
             "Fruit Macro-F1": t_m.get("fruit_macro_f1"),
         })
 
+        # 4b. Teacher restricted to the fruits the Student is evaluated on (fruits with RGB images),
+        #     so Teacher vs Student is compared on the same fruit set.
+        t_fruit_csv = t_json.parent / "test_fruit_predictions.csv"
+        s_fruit_csv = student_results_dir / "test_fruit_predictions.csv"
+        if t_fruit_csv.is_file() and s_fruit_csv.is_file():
+            t_fr = pd.read_csv(t_fruit_csv)
+            s_ids = set(pd.read_csv(s_fruit_csv)["fruit_id"])
+            t_common = t_fr[t_fr["fruit_id"].isin(list(s_ids))]
+            if len(t_common) > 0 and len(t_common) < len(t_fr):
+                rows.append({
+                    "Model": f"4b. Multi-Modal Teacher (same {len(t_common)} RGB fruits as Student)",
+                    "Test Input": "Multi-View RGB + Audio + Sensor",
+                    "Sample Acc": None,
+                    "Sample Macro-F1": None,
+                    "Fruit Acc": float(accuracy_score(t_common["y_true"], t_common["y_pred"])),
+                    "Fruit Macro-F1": float(f1_score(t_common["y_true"], t_common["y_pred"], average="macro",
+                                                     labels=[0, 1, 2], zero_division=0)),
+                })
+
     # 5. Vision-Only Student (CMKD)
     st_json = student_results_dir / "test_metrics.json"
     if st_json.is_file():
@@ -280,6 +306,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--no-tta", action="store_true", help="Disable 3-view TTA (orig + hflip + 95%% zoom)")
     return p.parse_args()
 
 
@@ -297,6 +324,7 @@ def main() -> None:
         device=args.device,
         smoke=args.smoke,
         seed=args.seed,
+        tta=not args.no_tta,
     )
     m = res["metrics"]
     print(

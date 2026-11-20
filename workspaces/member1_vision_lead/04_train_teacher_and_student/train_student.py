@@ -28,13 +28,14 @@ Usage (from project root):
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
 import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, cast
 
 THIS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = THIS_DIR.parents[2]
@@ -55,7 +56,7 @@ from torch.utils.data import DataLoader, Subset  # noqa: E402
 from src.datasets.multimodal_dataset import build_multimodal_datasets, worker_init_fn  # noqa: E402
 from src.datasets.sensor_dataset import SENSOR_PREPROCESSOR_PATH, SENSOR_RESULTS_DIR  # noqa: E402
 from src.losses.classification_loss import compute_class_weights  # noqa: E402
-from src.losses.distillation_loss import CrossModalDistillationLoss  # noqa: E402
+from src.losses.distillation_loss import FEAT_LOSS_TYPES, KD_WEIGHTINGS, CrossModalDistillationLoss  # noqa: E402
 from src.models.student_model import (  # noqa: E402
     StudentConfig,
     VisionStudent,
@@ -127,8 +128,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--beta", type=float, default=2.0, help="Weight for L_KD (KL Divergence soft logits)")
     p.add_argument("--gamma", type=float, default=1.0, help="Weight for L_feat (latent f_mm alignment)")
     p.add_argument("--temperature", type=float, default=3.0, help="Softmax temperature T for L_KD")
-    p.add_argument("--feat-loss-type", default="cosine", choices=["cosine", "mse", "cosine_mse"],
-                   help="Distance function L_feat between phi(f_img) and f_mm")
+    p.add_argument("--feat-loss-type", default="cosine", choices=list(FEAT_LOSS_TYPES),
+                   help="Distance function L_feat between phi(f_img) and the Teacher target feature "
+                        "(relational = match in-batch similarity structure instead of absolute features)")
+    p.add_argument("--feat-target", default="fused", choices=["fused", "vision"],
+                   help="Teacher feature aligned by L_feat: 'fused' = f_mm (contains audio/sensor info), "
+                        "'vision' = Teacher's own vision-branch embedding (learnable from RGB alone)")
+    p.add_argument("--kd-weighting", default="none", choices=list(KD_WEIGHTINGS),
+                   help="Per-sample L_KD weighting: none | teacher_correct | teacher_confidence")
     p.add_argument("--loss-type", default="cost_sensitive_focal",
                    choices=["cost_sensitive_focal", "focal", "ce"],
                    help="Student L_CE loss type")
@@ -152,6 +159,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--select-metric", default="fruit_macro_f1",
                    choices=["sample_macro_f1", "fruit_macro_f1", "val_loss"])
+    p.add_argument("--ema-decay", type=float, default=0.0,
+                   help="If > 0, keep an EMA of Student weights (e.g. 0.99) and validate/save the EMA model")
+    p.add_argument("--no-tta", action="store_true",
+                   help="Disable 3-view TTA (orig + hflip + 95%% zoom) during validation and final evaluation")
 
     # Hardware & Utilities
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -205,6 +216,24 @@ def filter_rgb_indices(multimodal_ds) -> List[int]:
         )
         return list(range(len(multimodal_ds)))
     return indices
+
+
+class ModelEMA:
+    """Exponential Moving Average of Student weights (smoother, less val-noise-dependent checkpoints)."""
+
+    def __init__(self, model: torch.nn.Module, decay: float) -> None:
+        self.decay = float(decay)
+        self.module = copy.deepcopy(model).eval()
+        for p in self.module.parameters():
+            p.requires_grad = False
+
+    @torch.no_grad()
+    def update(self, model: torch.nn.Module) -> None:
+        for ema_v, v in zip(self.module.state_dict().values(), model.state_dict().values()):
+            if ema_v.dtype.is_floating_point:
+                ema_v.mul_(self.decay).add_(v.detach(), alpha=1.0 - self.decay)
+            else:
+                ema_v.copy_(v)
 
 
 def _atomic_torch_save(payload: Dict, target: Path) -> None:
@@ -270,7 +299,15 @@ def train_one_epoch(
     grad_clip: float,
     max_batches: int,
     desc: str,
+    feat_target: str = "fused",
+    ema: Optional[ModelEMA] = None,
 ) -> Dict[str, float]:
+    """One distillation epoch.
+
+    feat_target: "fused" aligns phi(f_img) with Teacher f_mm; "vision" aligns it with the Teacher's
+                 vision-branch embedding (details["features"]["vision"]).
+    ema: if given, updated after every optimizer step.
+    """
     student.train()
     teacher.eval()
     optimizer.zero_grad(set_to_none=True)
@@ -289,11 +326,15 @@ def train_one_epoch(
 
         ctx = torch.autocast(device.type, dtype=amp_dtype) if amp_on else nullcontext()
         with torch.no_grad(), ctx:
-            logits_t, f_mm_t = teacher(img, audio, sensor)
+            if feat_target == "vision":
+                logits_t, _f_mm_t, details_t = teacher(img, audio, sensor, return_details=True)
+                feat_t = details_t["features"]["vision"]
+            else:
+                logits_t, feat_t = teacher(img, audio, sensor)
 
         with ctx:
             logits_s, _f_img_s, f_proj_s = student(img, return_features=True)
-            loss, parts = criterion(logits_s, logits_t, f_proj_s, f_mm_t, label)
+            loss, parts = criterion(logits_s, logits_t, f_proj_s, feat_t, label)
 
         scaler.scale(loss / accum_steps).backward()
         if (step + 1) % accum_steps == 0 or (step + 1) == n_batches:
@@ -303,6 +344,8 @@ def train_one_epoch(
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
+            if ema is not None:
+                ema.update(student)
 
         bs = label.size(0)
         tot_loss += parts["loss_total"] * bs
@@ -338,6 +381,7 @@ def validate_student(
     amp_on: bool,
     amp_dtype: torch.dtype,
     max_batches: int = 0,
+    tta: bool = False,
 ) -> Dict[str, float]:
     """Evaluate Student on Val USING ONLY RGB IMAGES (no Teacher, Audio, or Sensor)."""
     student.eval()
@@ -348,7 +392,7 @@ def validate_student(
         img, label, fid = batch[0].to(device, non_blocking=True), batch[1], batch[2]
         ctx = torch.autocast(device.type, dtype=amp_dtype) if amp_on else nullcontext()
         with ctx:
-            logits = student(img, return_features=False)
+            logits = student(img, return_features=False, tta=tta)
         probs_all.append(F.softmax(logits.float(), dim=-1).cpu())
         y_all.append(label)
         fids.extend(fid)
@@ -446,6 +490,7 @@ def main() -> None:
             save_path, args.manifest, args.data_dir, "valid", results_dir,
             batch_size=args.batch_size, num_workers=args.num_workers,
             image_size=args.image_size, device=device, smoke=args.smoke, seed=args.seed,
+            tta=not args.no_tta,
         )
         logger.info(f"VAL  | sample F1 {res_val['metrics']['sample_macro_f1']:.4f} | fruit F1 {res_val['metrics']['fruit_macro_f1']:.4f}")
         if args.eval_test:
@@ -453,6 +498,7 @@ def main() -> None:
                 save_path, args.manifest, args.data_dir, "test", results_dir,
                 batch_size=args.batch_size, num_workers=args.num_workers,
                 image_size=args.image_size, device=device, smoke=args.smoke, seed=args.seed,
+                tta=not args.no_tta,
             )
             logger.info(f"TEST | sample F1 {res_test['metrics']['sample_macro_f1']:.4f} | fruit F1 {res_test['metrics']['fruit_macro_f1']:.4f}")
             if not args.smoke:
@@ -461,7 +507,13 @@ def main() -> None:
 
     # ---- 1. Load Frozen Teacher ------------------------------------------------
     teacher = load_frozen_teacher(args, device)
-    latent_dim_mm = int(teacher.config.latent_dim_mm)
+    # Student projection head output must match the Teacher feature used as L_feat target
+    if args.feat_target == "vision":
+        latent_dim_mm = int(teacher.config.vision_dim)
+    else:
+        latent_dim_mm = int(teacher.config.latent_dim_mm)
+    logger.info(f"L_feat target: Teacher '{args.feat_target}' feature ({latent_dim_mm}-d) | "
+                f"KD weighting: {args.kd_weighting} | EMA: {args.ema_decay or 'off'} | TTA: {not args.no_tta}")
 
     # ---- 2. Build Datasets -----------------------------------------------------
     # Train requires MultimodalDataset (so Teacher gets img + audio + sensor), filtered to samples with real RGB images
@@ -534,6 +586,7 @@ def main() -> None:
         label_smoothing=args.label_smoothing,
         focal_gamma=args.focal_gamma,
         cost_weight=args.cost_weight,
+        kd_weighting=args.kd_weighting,
     ).to(device)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_on and amp_dtype == torch.float16)
 
@@ -556,6 +609,7 @@ def main() -> None:
 
     history, best, bad_epochs, start_epoch = [], {}, 0, 1
     resume_state = None
+    ema_resume_state = None
     if resuming:
         try:
             cand_state = torch.load(last_path, map_location="cpu", weights_only=False)
@@ -564,6 +618,8 @@ def main() -> None:
             if cand_state.get("scaler_state_dict") and scaler.is_enabled():
                 scaler.load_state_dict(cand_state["scaler_state_dict"])
             resume_state = cand_state
+            if args.ema_decay > 0 and cand_state.get("ema_state_dict"):
+                ema_resume_state = cand_state["ema_state_dict"]
             history = list(resume_state.get("history", []))
             best = dict(resume_state.get("best", {}))
             bad_epochs = int(resume_state.get("bad_epochs", 0))
@@ -577,6 +633,15 @@ def main() -> None:
             resuming = False
             resume_state = None
 
+    ema = ModelEMA(student, args.ema_decay) if args.ema_decay > 0 else None
+    if ema is not None and ema_resume_state is not None:
+        ema.module.load_state_dict(ema_resume_state, strict=True)
+    use_tta = not args.no_tta
+
+    def eval_model() -> VisionStudent:
+        """Model that is validated / saved: the EMA copy when enabled, otherwise the live Student."""
+        return cast(VisionStudent, ema.module) if ema is not None else student
+
     phase2_epochs = max(args.epochs - args.warmup_epochs, 0)
     prefix = "smoke_" if args.smoke else ""
 
@@ -585,8 +650,9 @@ def main() -> None:
             student, teacher, train_loader, criterion, optimizer, scaler,
             device, amp_on, amp_dtype, args.accum_steps, args.grad_clip,
             args.max_batches, f"{phase} ep {epoch}",
+            feat_target=args.feat_target, ema=ema,
         )
-        va = validate_student(student, val_loader, device, amp_on, amp_dtype, args.max_batches)
+        va = validate_student(eval_model(), val_loader, device, amp_on, amp_dtype, args.max_batches, tta=use_tta)
         lrs = {f"lr_{g.get('name', i)}": g["lr"] for i, g in enumerate(optimizer.param_groups)}
         row = {"epoch": epoch, "phase": phase, **tr, **va, **lrs}
         history.append(row)
@@ -603,10 +669,11 @@ def main() -> None:
             best = dict(row)
             _atomic_torch_save(
                 student_checkpoint_dict(
-                    student,
+                    eval_model(),
                     epoch=row["epoch"],
                     phase=row["phase"],
                     val_metrics=row,
+                    is_ema=ema is not None,
                     select_metric=args.select_metric,
                     train_args=vars(args),
                 ),
@@ -625,6 +692,7 @@ def main() -> None:
                 optimizer_state_dict=optimizer.state_dict(),
                 scheduler_state_dict=scheduler.state_dict() if scheduler is not None else None,
                 scaler_state_dict=scaler.state_dict() if scaler.is_enabled() else None,
+                ema_state_dict=ema.module.state_dict() if ema is not None else None,
                 best=best,
                 bad_epochs=bad_epochs,
                 history=history,
@@ -705,6 +773,7 @@ def main() -> None:
             save_path, args.manifest, args.data_dir, "valid", results_dir,
             batch_size=args.batch_size, num_workers=args.num_workers,
             image_size=args.image_size, device=device, smoke=args.smoke, seed=args.seed,
+            tta=not args.no_tta,
         )
         logger.info(
             f"VAL  | sample Acc {res_val['metrics']['sample_accuracy']:.4f} | "
@@ -718,6 +787,7 @@ def main() -> None:
                 save_path, args.manifest, args.data_dir, "test", results_dir,
                 batch_size=args.batch_size, num_workers=args.num_workers,
                 image_size=args.image_size, device=device, smoke=args.smoke, seed=args.seed,
+                tta=not args.no_tta,
             )
             logger.info(
                 f"TEST | sample Acc {res_test['metrics']['sample_accuracy']:.4f} | "

@@ -148,6 +148,9 @@ class VisionStudent(nn.Module):
             nn.Linear(self.feat_dim, c.num_classes),
         )
         self.backbone_frozen = False
+        # When True, inference-mode forward passes (return_features=False) use 3-view TTA
+        # (original + hflip + 95% zoom), matching the unimodal Vision baseline evaluation protocol.
+        self.tta_enabled = False
 
         if has_unimodal_ckpt:
             self.load_unimodal(vision_ckpt)
@@ -217,6 +220,7 @@ class VisionStudent(nn.Module):
         img: torch.Tensor,
         return_features: bool = False,
         view_counts: Optional[List[int]] = None,
+        tta: Optional[bool] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
         """RGB-only forward pass (supports 5D multi-view fruit bags `[B, N, 3, H, W]` or 4D `[B, 3, H, W]`).
 
@@ -225,8 +229,11 @@ class VisionStudent(nn.Module):
             return_features: If True, returns `(logits, f_img, f_proj)` for distillation loss.
                              If False, returns `logits` `[B, num_classes]` for inference/evaluation.
             view_counts: Optional view counts per fruit if `img` is flattened `[Total_Views, 3, H, W]`.
+            tta: Apply 3-view TTA. Defaults to `self.tta_enabled` for inference (never used for training).
         """
-        f_img = self.vision_backbone(img, view_counts=view_counts)
+        if tta is None:
+            tta = self.tta_enabled and not return_features and not self.training
+        f_img = self.vision_backbone(img, view_counts=view_counts, tta=tta)
         logits = self.classifier(f_img)
         if return_features:
             f_proj = self.projection_head(f_img)

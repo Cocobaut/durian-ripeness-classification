@@ -440,7 +440,7 @@ def test_validate_student_perfect_predictions():
             super().__init__()
             self.calls = 0
 
-        def forward(self, img, return_features=False):
+        def forward(self, img, return_features=False, tta=False):
             out = torch.full((img.shape[0], 3), -20.0)
             for r in range(img.shape[0]):
                 out[r, labels[self.calls + r]] = 20.0
@@ -569,3 +569,145 @@ def test_train_student_main_smoke(tmp_path, monkeypatch):
     student = build_student_from_checkpoint(best)
     with torch.no_grad():
         assert student(torch.randn(1, 2, 3, IMG, IMG)).shape == (1, 3)
+
+
+# ------------------------------------------------------------------------------
+# 9. CMKD v2 options: relational L_feat, KD weighting, vision feature target, EMA, TTA
+# ------------------------------------------------------------------------------
+@pytest.mark.parametrize("feat_type", ["relational", "cosine_relational"])
+def test_relational_feat_loss(feat_type):
+    crit = make_criterion(feat_loss_type=feat_type)
+    t = torch.randn(6, LATENT)
+    # Relational loss only depends on the similarity structure -> invariant to a global rotation
+    q, _ = torch.linalg.qr(torch.randn(LATENT, LATENT))
+    rel_only = make_criterion(feat_loss_type="relational")
+    assert rel_only.compute_feat_loss(t @ q, t).item() == pytest.approx(0.0, abs=1e-5)
+    assert crit.compute_feat_loss(t.clone(), t).item() == pytest.approx(0.0, abs=1e-5)
+    s = torch.randn(6, LATENT, requires_grad=True)
+    loss = crit.compute_feat_loss(s, t)
+    loss.backward()
+    assert loss.item() > 0 and s.grad is not None
+    # Single valid sample -> relational term is 0 but still differentiable
+    one = make_criterion(feat_loss_type="relational").compute_feat_loss(s[:1], t[:1])
+    assert one.item() == 0.0
+
+
+def test_kd_weighting_teacher_correct_and_confidence():
+    logits_s = torch.randn(4, 3)
+    logits_t = torch.tensor([[5.0, 0, 0], [0, 5.0, 0], [5.0, 0, 0], [0, 0, 5.0]])
+    y = torch.tensor([0, 1, 2, 2])  # sample 2: Teacher wrong
+
+    crit = make_criterion(kd_weighting="teacher_correct")
+    w = crit.kd_sample_weights(logits_t, y)
+    assert w.tolist() == [1.0, 1.0, 0.0, 1.0]
+    keep = [0, 1, 3]
+    expected = make_criterion().compute_kd_loss(logits_s[keep], logits_t[keep])
+    assert crit.compute_kd_loss(logits_s, logits_t, y).item() == pytest.approx(expected.item(), rel=1e-5)
+
+    conf = make_criterion(kd_weighting="teacher_confidence").kd_sample_weights(logits_t, y)
+    assert conf[2] < 0.05 and conf[0] > 0.9
+
+    # All Teacher predictions wrong -> KD contributes 0
+    y_wrong = torch.tensor([1, 2, 1, 0])
+    assert crit.compute_kd_loss(logits_s, logits_t, y_wrong).item() == 0.0
+    with pytest.raises(ValueError):
+        make_criterion(kd_weighting="bogus")
+
+
+def test_student_tta_forward():
+    student = tiny_student().eval()
+    x = torch.randn(2, 3, 3, IMG, IMG)
+    x[1, 2] = 0.0  # padded view must stay ignored under TTA
+    with torch.no_grad():
+        plain = student(x)
+        tta = student(x, tta=True)
+        student.tta_enabled = True
+        auto = student(x)
+        # TTA never applies to the distillation (return_features=True) path
+        feats_logits, _, _ = student(x, return_features=True)
+    assert tta.shape == plain.shape == (2, 3)
+    assert not torch.allclose(plain, tta)
+    assert torch.allclose(auto, tta)
+    assert torch.allclose(feats_logits, plain)
+
+
+def test_train_one_epoch_vision_feat_target_and_ema():
+    torch.manual_seed(0)
+    teacher, student = tiny_teacher(), tiny_student(latent_dim_mm=256)  # Teacher vision_dim = 256
+    loader = DataLoader(FakeMultimodalDataset(n=4), batch_size=2)
+    opt = torch.optim.AdamW(student.param_groups(1e-4, 1e-3))
+    ema = train_student.ModelEMA(student, decay=0.5)
+    ema_before = clone_params(ema.module)
+
+    stats = train_student.train_one_epoch(
+        student, teacher, loader, make_criterion(feat_loss_type="cosine_relational"), opt,
+        torch.amp.GradScaler("cuda", enabled=False), torch.device("cpu"),
+        False, torch.float32, 1, 1.0, 0, "test", feat_target="vision", ema=ema,
+    )
+    assert stats["train_loss_feat"] > 0
+    assert not params_equal(ema.module, ema_before), "EMA must be updated after optimizer steps"
+    assert not any(p.requires_grad for p in ema.module.parameters())
+    # EMA lies between its initial value and the live Student weights
+    p_live = next(student.classifier.parameters())
+    p_ema = next(ema.module.classifier.parameters())
+    assert not torch.equal(p_live, p_ema)
+
+
+@needs_manifest
+def test_evaluate_student_split_with_tta(tmp_path):
+    student = tiny_student().eval()
+    ckpt = tmp_path / "best_student.pth"
+    torch.save(student_checkpoint_dict(student, epoch=1), ckpt)
+    res = eval_student.evaluate_student_split(
+        ckpt, MANIFEST, DATA_DIR, "test", tmp_path / "res",
+        batch_size=2, num_workers=0, image_size=IMG, device="cpu", smoke=True, tta=True,
+    )
+    assert 0.0 <= res["metrics"]["fruit_macro_f1"] <= 1.0
+
+
+def test_benchmark_adds_teacher_on_student_fruits(tmp_path):
+    fake_root = tmp_path / "project"
+    student_dir = tmp_path / "results_student"
+    student_dir.mkdir()
+    t_dir = fake_root / "workspaces" / "member1_vision_lead" / "04_train_teacher_and_student" / "results_teacher"
+    t_dir.mkdir(parents=True)
+    metrics = {"sample_accuracy": 0.8, "sample_macro_f1": 0.8, "fruit_accuracy": 0.75, "fruit_macro_f1": 0.75}
+    for d in (t_dir, student_dir):
+        (d / "test_metrics.json").write_text(json.dumps({"metrics": metrics}), encoding="utf-8")
+    # Teacher: 4 fruits (last one has no RGB and is wrong); Student: first 3 fruits
+    pd.DataFrame({"fruit_id": ["a", "b", "c", "d"], "y_true": [0, 1, 2, 2], "y_pred": [0, 1, 2, 0]}).to_csv(
+        t_dir / "test_fruit_predictions.csv", index=False)
+    pd.DataFrame({"fruit_id": ["a", "b", "c"], "y_true": [0, 1, 2], "y_pred": [0, 0, 2]}).to_csv(
+        student_dir / "test_fruit_predictions.csv", index=False)
+
+    df = eval_student.generate_benchmark_comparison(student_dir, project_root=fake_root)
+    row = df[df["Model"].str.startswith("4b.")]
+    assert len(row) == 1 and "same 3 RGB fruits" in row["Model"].iloc[0]
+    assert row["Fruit Acc"].iloc[0] == pytest.approx(1.0)
+    assert "—" in (student_dir / "benchmark_comparison.md").read_text(encoding="utf-8")
+
+
+@needs_manifest
+def test_train_student_main_smoke_v2_recipe(tmp_path, monkeypatch):
+    monkeypatch.setattr(train_student, "TEACHER_CKPT_CANDIDATES", [])
+    teacher_ckpt = tmp_path / "best_teacher.pth"
+    torch.save(teacher_checkpoint_dict(tiny_teacher(), epoch=1, val_f1=0.5), teacher_ckpt)
+    results_dir = tmp_path / "results_student"
+    save_path = tmp_path / "ckpt" / "best_student.pth"
+    monkeypatch.setattr(sys, "argv", [
+        "train_student.py", "--smoke", "--teacher-ckpt", str(teacher_ckpt),
+        "--student-backbone", "resnet18", "--proj-hidden-dim", "64", "--image-size", str(IMG),
+        "--batch-size", "2", "--accum-steps", "1", "--num-workers", "0", "--device", "cpu", "--no-amp", "--fresh",
+        "--feat-target", "vision", "--feat-loss-type", "cosine_relational", "--kd-weighting", "teacher_correct",
+        "--ema-decay", "0.9", "--select-metric", "val_loss", "--beta", "1.0", "--gamma", "0.3",
+        "--temperature", "4.0", "--save-path", str(save_path), "--results-dir", str(results_dir),
+    ])
+    train_student.main()
+
+    best = save_path.with_name("smoke_student.pth")
+    ckpt = torch.load(best, map_location="cpu", weights_only=False)
+    assert ckpt["is_ema"] is True
+    assert ckpt["latent_dim_mm"] == 256, "With --feat-target vision the projection must match Teacher vision_dim"
+    last = torch.load(save_path.with_name("smoke_last_student.pth"), map_location="cpu", weights_only=False)
+    assert last["ema_state_dict"] is not None
+    assert (results_dir / "smoke_val_metrics.json").is_file()

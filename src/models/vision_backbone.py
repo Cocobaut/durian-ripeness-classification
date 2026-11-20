@@ -125,6 +125,18 @@ class VisionBackbone(nn.Module):
         h = self.backbone(flat_images)  # [Total_Views, backbone_dim]
         return self.projection(h)       # [Total_Views, embed_dim]
 
+    def extract_view_embeddings_tta(self, flat_images: torch.Tensor) -> torch.Tensor:
+        """3-view TTA identical to the unimodal Vision baseline evaluation:
+        0.50 * original + 0.30 * horizontal flip + 0.20 * 95% central zoom.
+        """
+        f_orig = self.extract_view_embeddings(flat_images)
+        f_hflip = self.extract_view_embeddings(torch.flip(flat_images, dims=[3]))
+        pad = max(1, int(flat_images.shape[-1] * 0.025))
+        cropped = flat_images[:, :, pad:-pad, pad:-pad]
+        zoomed = nn.functional.interpolate(cropped, size=flat_images.shape[-2:], mode="bilinear", align_corners=False)
+        f_zoom = self.extract_view_embeddings(zoomed)
+        return 0.50 * f_orig + 0.30 * f_hflip + 0.20 * f_zoom
+
     def pool_fruit_bags(
         self,
         f_all_views: torch.Tensor,
@@ -150,6 +162,7 @@ class VisionBackbone(nn.Module):
         x: torch.Tensor,
         view_counts: Optional[List[int]] = None,
         return_attn: bool = False,
+        tta: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, List[torch.Tensor]]]:
         """Extract fruit-level representation F_rgb [B, 256] via Multi-View Gated Attention Pooling.
 
@@ -158,11 +171,14 @@ class VisionBackbone(nn.Module):
         - 4D tensor `[Total_Views, C, H, W]` with `view_counts=[N_1, ..., N_B]`: flattened multi-view bags.
         - 4D tensor `[B, C, H, W]` with `view_counts=None`: B single-view samples (each treated as N=1 bag).
         - 3D tensor `[C, H, W]`: single image -> `[1, 256]`.
+
+        `tta=True` applies the per-view 3-crop/flip TTA (`extract_view_embeddings_tta`) before pooling.
         """
+        extract = self.extract_view_embeddings_tta if tta else self.extract_view_embeddings
         if x.dim() == 3:
             x = x.unsqueeze(0).unsqueeze(0)
         elif x.dim() == 4 and view_counts is not None:
-            f_all = self.extract_view_embeddings(x)
+            f_all = extract(x)
             F_rgb_batch, attn_list = self.pool_fruit_bags(f_all, view_counts)
             self.last_attn_weights = [w.detach() for w in attn_list]
             return (F_rgb_batch, attn_list) if return_attn else F_rgb_batch
@@ -185,7 +201,7 @@ class VisionBackbone(nn.Module):
             return (zero_out, attn_list) if return_attn else zero_out
 
         valid_imgs = x[valid_mask]  # [total_valid, C, H, W]
-        f_valid = self.extract_view_embeddings(valid_imgs)  # [total_valid, embed_dim]
+        f_valid = extract(valid_imgs)  # [total_valid, embed_dim]
         F_rgb_batch, attn_list = self.pool_fruit_bags(f_valid, counts)
         self.last_attn_weights = [w.detach() for w in attn_list]
         return (F_rgb_batch, attn_list) if return_attn else F_rgb_batch
