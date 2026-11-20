@@ -141,9 +141,9 @@ def expected_calibration_error(y_true: np.ndarray, probs: np.ndarray, n_bins: in
 @dataclass
 class StudentEvaluatorConfig:
     """Evaluation configuration. Default paths can be overridden via CLI arguments."""
-    student_checkpoint_path: str = "checkpoints/student_distilled_best.pth"
-    baseline_checkpoint_path: str = "checkpoints/unimodal/best_vision_unimodal.pth"
-    teacher_checkpoint_path: str = "checkpoints/teacher_best.pth"
+    student_checkpoint_path: str = "checkpoints/studentmodal/best_student.pth"
+    baseline_checkpoint_path: str = "checkpoints/unimodal/image/best_convnextv2_multiview.pth"
+    teacher_checkpoint_path: str = "checkpoints/teachermodal/best_teacher.pth"
     test_rgb_dir: str = "data/final/test/rgb"
     manifest_path: str = "data/final/final_multimodal_manifest.csv"
     output_dir: str = "workspaces/member3_sensor/03_test_eval_student/results"
@@ -238,7 +238,7 @@ class StudentEvaluator:
                     state = ckpt[k]
                     break
         state = {k[7:] if k.startswith("module.") else k: v for k, v in state.items()}
-        skip = ("projection", "proj_head", "phi.")
+        skip = ("projection_head", "proj_head", "phi.")
         state = {k: v for k, v in state.items() if not k.startswith(skip)}
         missing, unexpected = model.load_state_dict(state, strict=False)
         if missing:
@@ -876,9 +876,9 @@ def parse_args():
     import argparse
 
     p = argparse.ArgumentParser(description="Evaluate Student / Baseline / Teacher and profile deployment metrics (CMKD)")
-    p.add_argument("--student-checkpoint", default="checkpoints/student_distilled_best.pth")
-    p.add_argument("--baseline-checkpoint", default="checkpoints/unimodal/best_vision_unimodal.pth")
-    p.add_argument("--teacher-checkpoint", default="checkpoints/teacher_best.pth")
+    p.add_argument("--student-checkpoint", default="checkpoints/studentmodal/best_student.pth")
+    p.add_argument("--baseline-checkpoint", default="checkpoints/unimodal/image/best_convnextv2_multiview.pth")
+    p.add_argument("--teacher-checkpoint", default="checkpoints/teachermodal/best_teacher.pth")
     p.add_argument("--output-dir", default="workspaces/member3_sensor/03_test_eval_student/results")
     p.add_argument("--batch-size", type=int, default=16)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")

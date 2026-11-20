@@ -83,13 +83,21 @@ TEACHER_CKPT_CANDIDATES = [
     "checkpoints/teachermodal/best_teacher.pth",
     "checkpoints/teacher/best_teacher.pth",
 ]
+VISION_CKPT_CANDIDATES = [
+    "checkpoints/unimodal/vision/best_convnextv2_multiview.pth",
+    "checkpoints/unimodal/vision/convnextv2_multiview_backbone_256d.pth",
+    "checkpoints/unimodal/vision/best_vision_unimodal.pth",
+    "checkpoints/unimodal/image/best_convnextv2_multiview.pth",
+    "checkpoints/unimodal/image/convnextv2_multiview_backbone_256d.pth",
+    "checkpoints/unimodal/image/best_vision_unimodal.pth",
+]
 
 
 # ------------------------------------------------------------------------------
 # 1. Command-line arguments
 # ------------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train Vision-Only Student via CMKD (Stage 2)")
+    p = argparse.ArgumentParser(description="Train Multi-View Vision-Only Student via CMKD (Stage 2)")
     # Data & Paths
     p.add_argument("--manifest", default="data/final/final_multimodal_manifest.csv")
     p.add_argument("--data-dir", default="data/final")
@@ -98,18 +106,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--teacher-ckpt", default="checkpoints/teachermodal/best_teacher.pth",
                    help="Path to best_teacher.pth checkpoint trained in Stage 1B")
     p.add_argument("--init-vision-ckpt", default=None,
-                   help="Optional: initialize from best_vision_unimodal.pth if architecture matches")
+                   help="Default: auto-search Multi-View ConvNeXtV2 checkpoint in checkpoints/unimodal/{vision,image}/")
+    p.add_argument("--no-unimodal-init", action="store_true",
+                   help="Do not auto-initialize Student from unimodal Multi-View ConvNeXtV2 checkpoint")
     p.add_argument("--save-path", default="checkpoints/studentmodal/best_student.pth")
     p.add_argument("--results-dir",
                    default="workspaces/member1_vision_lead/04_train_teacher_and_student/results_student")
 
     # Student architecture
-    p.add_argument("--student-backbone", default="convnextv2_tiny",
-                   help="Student backbone: convnextv2_tiny (default, ~28M), convnextv2_nano, convnextv2_base, resnet18...")
+    p.add_argument("--student-backbone", default="convnextv2_base",
+                   help="Student backbone: convnextv2_base (default, Multi-View + 256-d Proj + Gated Attention), convnextv2_tiny...")
     p.add_argument("--no-pretrained", action="store_true",
                    help="Disable loading ImageNet pretrained weights when initializing Student")
     p.add_argument("--drop-path", type=float, default=0.2)
-    p.add_argument("--head-dropout", type=float, default=0.2)
+    p.add_argument("--head-dropout", type=float, default=0.25)
     p.add_argument("--proj-hidden-dim", type=int, default=512)
 
     # Distillation Loss weights (Section 1.3.3)
@@ -130,11 +140,11 @@ def parse_args() -> argparse.Namespace:
     # Training hyperparameters
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--warmup-epochs", type=int, default=3,
-                   help="Initial epochs to freeze backbone and stabilize ProjectionHead + Classifier")
-    p.add_argument("--batch-size", type=int, default=16)
-    p.add_argument("--accum-steps", type=int, default=1)
+                   help="Initial epochs to freeze VisionBackbone and stabilize ProjectionHead + Classifier")
+    p.add_argument("--batch-size", type=int, default=4, help="Multi-view fruit-bag batch size")
+    p.add_argument("--accum-steps", type=int, default=2, help="Gradient accumulation steps")
     p.add_argument("--lr", type=float, default=5e-4, help="LR for ProjectionHead + Classifier")
-    p.add_argument("--lr-backbone", type=float, default=1e-4, help="LR for VisionBackbone in Phase 2")
+    p.add_argument("--lr-backbone", type=float, default=1.5e-5, help="LR for VisionBackbone in Phase 2")
     p.add_argument("--min-lr", type=float, default=1e-6)
     p.add_argument("--weight-decay-head", type=float, default=1e-2)
     p.add_argument("--weight-decay-backbone", type=float, default=1e-4)
@@ -185,7 +195,10 @@ def amp_settings(device: torch.device, enabled: bool):
 
 def filter_rgb_indices(multimodal_ds) -> List[int]:
     """Keep only samples with real RGB images on disk (drop image = 0 samples from RGB-missing fruits)."""
-    indices = [i for i, s in enumerate(multimodal_ds.samples) if s.get("img_path") is not None]
+    indices = [
+        i for i, s in enumerate(multimodal_ds.samples)
+        if bool(s.get("img_paths")) or (s.get("img_path") is not None)
+    ]
     if not indices:
         logger.warning(
             "No RGB image files found in data_dir (local/smoke run without images) -> using all manifest samples."
@@ -205,15 +218,23 @@ def load_frozen_teacher(args, device: torch.device) -> MultiModalTeacher:
     search = ([args.teacher_ckpt] if args.teacher_ckpt else []) + list(TEACHER_CKPT_CANDIDATES)
     ckpt_path = first_existing(search)
     if ckpt_path is not None:
-        logger.info(f"Loading Frozen Teacher from: {ckpt_path}")
-        return build_teacher_from_checkpoint(ckpt_path, device=device, eval_mode=True)
+        try:
+            logger.info(f"Loading Frozen Teacher from: {ckpt_path}")
+            return build_teacher_from_checkpoint(ckpt_path, device=device, eval_mode=True)
+        except Exception as exc:
+            if not args.smoke:
+                raise RuntimeError(
+                    f"Teacher checkpoint at {ckpt_path} belongs to an older architecture ({exc}). "
+                    "Please re-train the Multi-Modal Teacher first (`01_train_multimodal_teacher.ipynb` / `train_teacher.py`)."
+                ) from exc
+            logger.warning(f"--smoke mode: existing Teacher checkpoint incompatible ({type(exc).__name__}), using smoke Teacher.")
 
     if args.smoke:
         logger.warning("--smoke mode: best_teacher.pth not found, initializing lightweight Teacher for pipeline test.")
         t_cfg = TeacherConfig(
             vision_model_name="resnet18",
             vision_drop_path=0.0,
-            vision_dim=512,
+            vision_dim=256,
             audio_dim=512,
             sensor_input_dim=21,
             sensor_latent_dim=32,
@@ -474,6 +495,14 @@ def main() -> None:
     )
 
     # ---- 3. Initialize VisionStudent -------------------------------------------
+    init_vision_ckpt = None
+    if not args.no_unimodal_init and not args.smoke:
+        init_vision_ckpt = first_existing(
+            ([args.init_vision_ckpt] if args.init_vision_ckpt else []) + list(VISION_CKPT_CANDIDATES)
+        )
+    elif args.init_vision_ckpt:
+        init_vision_ckpt = first_existing([args.init_vision_ckpt])
+
     s_cfg = StudentConfig(
         backbone_name=args.student_backbone,
         pretrained=not args.no_pretrained,
@@ -483,10 +512,12 @@ def main() -> None:
         latent_dim_mm=latent_dim_mm,
         head_dropout=args.head_dropout,
     )
-    student = VisionStudent(s_cfg, vision_ckpt=resolve_path(args.init_vision_ckpt) if args.init_vision_ckpt else None)
+    student = VisionStudent(s_cfg, vision_ckpt=init_vision_ckpt)
     student.to(device)
+    if init_vision_ckpt is not None:
+        logger.info(f"Initialized Student VisionBackbone from unimodal checkpoint: {init_vision_ckpt}")
     n_params = sum(p.numel() for p in student.parameters())
-    logger.info(f"Student: {n_params / 1e6:.1f}M params | f_img = {student.feat_dim} -> f_proj = {latent_dim_mm}")
+    logger.info(f"Student: {n_params / 1e6:.1f}M params | F_rgb = {student.feat_dim} -> f_proj = {latent_dim_mm}")
 
     # ---- 4. 3-Component Distillation Loss --------------------------------------
     class_w = None if args.no_class_weights else compute_class_weights(train_labels, len(CLASS_ORDER))
@@ -509,6 +540,7 @@ def main() -> None:
     config_dump = {
         "model": "vision_student",
         **vars(args),
+        "init_vision_ckpt": str(init_vision_ckpt) if init_vision_ckpt else None,
         "save_path": str(save_path),
         "last_path": str(last_path),
         "device_used": str(device),
@@ -525,16 +557,25 @@ def main() -> None:
     history, best, bad_epochs, start_epoch = [], {}, 0, 1
     resume_state = None
     if resuming:
-        resume_state = torch.load(last_path, map_location="cpu", weights_only=False)
-        student.load_state_dict(resume_state["model_state_dict"], strict=True)
-        student.to(device)
-        if resume_state.get("scaler_state_dict") and scaler.is_enabled():
-            scaler.load_state_dict(resume_state["scaler_state_dict"])
-        history = list(resume_state.get("history", []))
-        best = dict(resume_state.get("best", {}))
-        bad_epochs = int(resume_state.get("bad_epochs", 0))
-        start_epoch = int(resume_state.get("epoch", 0)) + 1
-        logger.info(f"Resumed from {last_path} (finished epoch {start_epoch - 1}/{args.epochs})")
+        try:
+            cand_state = torch.load(last_path, map_location="cpu", weights_only=False)
+            student.load_state_dict(cand_state["model_state_dict"], strict=True)
+            student.to(device)
+            if cand_state.get("scaler_state_dict") and scaler.is_enabled():
+                scaler.load_state_dict(cand_state["scaler_state_dict"])
+            resume_state = cand_state
+            history = list(resume_state.get("history", []))
+            best = dict(resume_state.get("best", {}))
+            bad_epochs = int(resume_state.get("bad_epochs", 0))
+            start_epoch = int(resume_state.get("epoch", 0)) + 1
+            logger.info(f"Resumed from {last_path} (finished epoch {start_epoch - 1}/{args.epochs})")
+        except Exception as exc:
+            logger.warning(
+                f"Existing checkpoint {last_path} is incompatible with current Multi-View Student architecture "
+                f"({type(exc).__name__}); starting fresh training from Epoch 1."
+            )
+            resuming = False
+            resume_state = None
 
     phase2_epochs = max(args.epochs - args.warmup_epochs, 0)
     prefix = "smoke_" if args.smoke else ""

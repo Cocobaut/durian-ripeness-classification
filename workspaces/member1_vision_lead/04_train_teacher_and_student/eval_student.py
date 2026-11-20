@@ -48,7 +48,7 @@ logger = logging.getLogger("eval_student")
 
 
 class _ManifestFallbackImageDataset(torch.utils.data.Dataset):
-    """Fallback dataset for smoke/test runs on local machines without downloaded RGB images."""
+    """Fallback multi-view dataset for smoke/test runs on local machines without downloaded RGB images."""
 
     def __init__(self, fruit_ids, labels, image_size: int = IMAGE_SIZE):
         self.fruit_ids = list(fruit_ids)
@@ -59,8 +59,8 @@ class _ManifestFallbackImageDataset(torch.utils.data.Dataset):
         return len(self.fruit_ids)
 
     def __getitem__(self, idx: int):
-        img = torch.zeros(3, self.image_size, self.image_size, dtype=torch.float32)
-        return img, self.labels[idx], self.fruit_ids[idx], {"camera_angle": "NONE"}
+        img = torch.zeros(1, 3, self.image_size, self.image_size, dtype=torch.float32)
+        return img, self.labels[idx], self.fruit_ids[idx], {"camera_angle": "MULTI_VIEW"}
 
 
 def build_vision_eval_dataset(
@@ -69,14 +69,21 @@ def build_vision_eval_dataset(
     split: str,
     image_size: int = IMAGE_SIZE,
 ):
-    """Build `ImageDataset` containing only samples with real RGB images for `valid` or `test`."""
+    """Build Multi-View `ImageDataset` grouping all views of each fruit for `valid` or `test`."""
     resolved_split = split_dir_name(split)
     manifest = pd.read_csv(resolve_path(manifest_path))
     fruits = manifest[manifest["Split"] == resolved_split].sort_values("fruit_id")
     label_map = dict(zip(fruits["fruit_id"], fruits["label_idx"].astype(int)))
     rgb_dir = resolve_path(data_dir) / resolved_split / "rgb"
     records = list_rgb_images(rgb_dir)
-    ds = ImageDataset(records, label_map, transform=get_eval_transforms(image_size))
+    ds = ImageDataset(
+        records,
+        label_map,
+        transform=get_eval_transforms(image_size),
+        multiview=True,
+        is_train=False,
+        image_size=image_size,
+    )
     if len(ds) == 0:
         logger.warning(f"No RGB images found at {rgb_dir}; using fallback from manifest ({len(fruits)} fruits).")
         return _ManifestFallbackImageDataset(fruits["fruit_id"], fruits["label_idx"], image_size=image_size)
@@ -89,7 +96,7 @@ def evaluate_student_split(
     data_dir: Union[str, Path],
     split: str,
     output_dir: Union[str, Path],
-    batch_size: int = 16,
+    batch_size: int = 4,
     num_workers: int = 0,
     image_size: int = IMAGE_SIZE,
     device: Union[str, torch.device] = "cpu",
@@ -97,7 +104,7 @@ def evaluate_student_split(
     seed: int = 42,
     model: Optional[VisionStudent] = None,
 ) -> Dict:
-    """Evaluate VisionStudent on `valid` or `test` split using RGB images only."""
+    """Evaluate Multi-View VisionStudent on `valid` or `test` split using RGB image bags only."""
     ckpt_path = resolve_path(ckpt_path)
     output_dir = resolve_path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -146,9 +153,21 @@ def generate_benchmark_comparison(
     student_results_dir = resolve_path(student_results_dir)
     rows = []
 
-    # 1. Vision Unimodal Baseline
-    v_csv = project_root / "workspaces" / "member1_vision_lead" / "02_train_unimodal_vision" / "results" / "test_predictions_detailed.csv"
-    if v_csv.is_file():
+    # 1. Vision Unimodal Baseline (prefers Multi-View ConvNeXtV2-Base Gated Attention summary if present)
+    v_dir = project_root / "workspaces" / "member1_vision_lead" / "02_train_unimodal_vision" / "results"
+    v_mv_json = v_dir / "test_metrics_summary_multiview.json"
+    v_csv = v_dir / "test_predictions_detailed.csv"
+    if v_mv_json.is_file():
+        v_data = json.loads(v_mv_json.read_text(encoding="utf-8"))
+        rows.append({
+            "Model": "1. Vision Unimodal (ConvNeXtV2-Base Multi-View)",
+            "Test Input": "Multi-View RGB",
+            "Sample Acc": v_data.get("image_level_accuracy"),
+            "Sample Macro-F1": v_data.get("image_level_macro_f1"),
+            "Fruit Acc": v_data.get("fruit_level_accuracy"),
+            "Fruit Macro-F1": v_data.get("fruit_level_macro_f1"),
+        })
+    elif v_csv.is_file():
         v_df = pd.read_csv(v_csv)
         v_s_acc = float(v_df["is_correct"].mean())
         v_s_f1 = float(f1_score(v_df["true_label"], v_df["pred_label"], average="macro"))
@@ -198,11 +217,13 @@ def generate_benchmark_comparison(
 
     # 4. Multi-Modal Teacher
     t_json = project_root / "workspaces" / "member1_vision_lead" / "04_train_teacher_and_student" / "results" / "test_metrics.json"
+    if not t_json.is_file():
+        t_json = project_root / "workspaces" / "member1_vision_lead" / "04_train_teacher_and_student" / "results_teacher" / "test_metrics.json"
     if t_json.is_file():
         t_m = json.loads(t_json.read_text(encoding="utf-8")).get("metrics", {})
         rows.append({
             "Model": "4. Multi-Modal Teacher (Cross-Attention)",
-            "Test Input": "RGB + Audio + Sensor",
+            "Test Input": "Multi-View RGB + Audio + Sensor",
             "Sample Acc": t_m.get("sample_accuracy"),
             "Sample Macro-F1": t_m.get("sample_macro_f1"),
             "Fruit Acc": t_m.get("fruit_accuracy"),
@@ -214,8 +235,8 @@ def generate_benchmark_comparison(
     if st_json.is_file():
         st_m = json.loads(st_json.read_text(encoding="utf-8")).get("metrics", {})
         rows.append({
-            "Model": "5. Vision-Only Student (CMKD Distilled)",
-            "Test Input": "RGB Only",
+            "Model": "5. Vision-Only Student (CMKD Multi-View)",
+            "Test Input": "Multi-View RGB Only",
             "Sample Acc": st_m.get("sample_accuracy"),
             "Sample Macro-F1": st_m.get("sample_macro_f1"),
             "Fruit Acc": st_m.get("fruit_accuracy"),
@@ -247,13 +268,13 @@ def generate_benchmark_comparison(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Independent evaluation of Vision-Only Student model (Stage 2)")
+    p = argparse.ArgumentParser(description="Independent evaluation of Multi-View Vision-Only Student model (Stage 2)")
     p.add_argument("--checkpoint", default="checkpoints/studentmodal/best_student.pth")
     p.add_argument("--manifest", default="data/final/final_multimodal_manifest.csv")
     p.add_argument("--data-dir", default="data/final")
     p.add_argument("--split", default="test", choices=["val", "valid", "test"])
     p.add_argument("--output-dir", default="workspaces/member1_vision_lead/04_train_teacher_and_student/results_student")
-    p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--image-size", type=int, default=IMAGE_SIZE)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")

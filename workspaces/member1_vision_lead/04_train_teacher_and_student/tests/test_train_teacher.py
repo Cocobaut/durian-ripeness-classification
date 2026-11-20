@@ -107,7 +107,7 @@ def test_multimodal_dataset_direct_init():
     )
     assert len(ds) >= 28
     img, audio, sensor, label, fid, extras = ds[0]
-    assert img.shape == (3, 64, 64)
+    assert img.ndim == 4 and img.shape[1:] == (3, 64, 64)
     assert audio.shape == (1, 64, 306)
     assert sensor.shape == (21,)
     assert label in (0, 1, 2)
@@ -119,7 +119,7 @@ def test_teacher_two_phase_and_checkpoint_and_eval(tmp_path):
     cfg = TeacherConfig(
         vision_model_name="resnet18",  # use lightweight backbone in unit test for instant CPU execution
         vision_drop_path=0.0,
-        vision_dim=512,
+        vision_dim=256,
         audio_dim=512,
         sensor_input_dim=21,
         sensor_latent_dim=32,
@@ -146,14 +146,15 @@ def test_teacher_two_phase_and_checkpoint_and_eval(tmp_path):
     assert group_lrs["sensor"] == pytest.approx(1e-5)
     assert group_lrs["fusion_head"] == pytest.approx(5e-4)
 
-    # Forward & Zero-masking
+    # Forward & Zero-masking with 5D Multi-View Fruit Bags [B, N, 3, H, W]
     model.eval()
-    img = torch.randn(4, 3, 64, 64)
+    img = torch.randn(4, 3, 3, 64, 64)  # 4 fruits, 3 views per fruit
     audio = torch.zeros(4, 1, 64, 306)  # simulate zero-masked audio branch
     sensor = torch.randn(4, 21)
     logits, f_mm, details = model(img, audio, sensor, return_details=True)
     assert logits.shape == (4, 3)
     assert f_mm.shape == (4, 64)
+    assert details["features"]["vision"].shape == (4, 256)
     # When audio = 0, audio gate weight must equal 0
     assert torch.allclose(details["gate_weights"][:, 1], torch.zeros(4))
 
@@ -166,12 +167,26 @@ def test_teacher_two_phase_and_checkpoint_and_eval(tmp_path):
     assert torch.allclose(f_mm, f_mm2, atol=1e-6)
 
 
+def _find_vision_unimodal_ckpt() -> Path | None:
+    for rel in (
+        "checkpoints/unimodal/image/best_convnextv2_multiview.pth",
+        "checkpoints/unimodal/image/convnextv2_multiview_backbone_256d.pth",
+        "checkpoints/unimodal/vision/best_convnextv2_multiview.pth",
+        "checkpoints/unimodal/vision/convnextv2_multiview_backbone_256d.pth",
+        "checkpoints/unimodal/image/best_vision_unimodal.pth",
+    ):
+        p = PROJECT_ROOT / rel
+        if p.exists():
+            return p
+    return None
+
+
 @pytest.mark.skipif(
-    not (PROJECT_ROOT / "checkpoints" / "unimodal" / "image" / "best_vision_unimodal.pth").exists(),
-    reason="Requires all 3 unimodal checkpoints in checkpoints/unimodal/",
+    _find_vision_unimodal_ckpt() is None,
+    reason="Requires unimodal checkpoints in checkpoints/unimodal/",
 )
 def test_load_real_unimodal_checkpoints():
-    vision_ckpt = PROJECT_ROOT / "checkpoints" / "unimodal" / "image" / "best_vision_unimodal.pth"
+    vision_ckpt = _find_vision_unimodal_ckpt()
     audio_ckpt = PROJECT_ROOT / "checkpoints" / "unimodal" / "audio" / "audio_backbone_teacher.pth"
     sensor_ckpt = PROJECT_ROOT / "checkpoints" / "unimodal" / "sensor" / "best_sensor_unimodal.pth"
 
@@ -182,10 +197,10 @@ def test_load_real_unimodal_checkpoints():
     )
     model.eval()
     with torch.no_grad():
-        img = torch.randn(2, 3, 384, 384)
+        img_bag = torch.randn(2, 3, 3, 384, 384)  # 2 fruits, 3 views per fruit
         audio = torch.randn(2, 1, 64, 306)
         sensor = torch.randn(2, 21)
-        logits, f_mm = model(img, audio, sensor)
+        logits, f_mm = model(img_bag, audio, sensor)
     assert logits.shape == (2, 3)
     assert f_mm.shape == (2, 256)
 
@@ -204,12 +219,13 @@ def test_student_model_and_distillation_loss(tmp_path):
         pretrained=False,
         drop_path_rate=0.0,
         num_classes=3,
+        feat_dim=256,
         proj_hidden_dim=128,
         latent_dim_mm=256,
         head_dropout=0.1,
     )
     student = VisionStudent(cfg)
-    assert student.feat_dim == 512
+    assert student.feat_dim == 256
 
     # Phase 1: freeze backbone
     student.freeze_backbone()
@@ -224,11 +240,11 @@ def test_student_model_and_distillation_loss(tmp_path):
     assert group_lrs["backbone"] == pytest.approx(1e-4)
     assert group_lrs["student_head"] == pytest.approx(5e-4)
 
-    # Forward & Distillation Loss
-    img = torch.randn(4, 3, 64, 64)
-    logits_s, f_img_s, f_proj_s = student(img, return_features=True)
+    # Forward & Distillation Loss with 5D Multi-View Fruit Bags [B, N, 3, H, W]
+    img_bag = torch.randn(4, 3, 3, 64, 64)
+    logits_s, f_img_s, f_proj_s = student(img_bag, return_features=True)
     assert logits_s.shape == (4, 3)
-    assert f_img_s.shape == (4, 512)
+    assert f_img_s.shape == (4, 256)
     assert f_proj_s.shape == (4, 256)
 
     logits_t = torch.randn(4, 3)
@@ -251,8 +267,8 @@ def test_student_model_and_distillation_loss(tmp_path):
     torch.save(student_checkpoint_dict(student, epoch=2), ckpt_path)
     loaded = build_student_from_checkpoint(ckpt_path, device="cpu", eval_mode=True)
     with torch.no_grad():
-        out1 = student(img, return_features=False)
-        out2 = loaded(img, return_features=False)
+        out1 = student(img_bag, return_features=False)
+        out2 = loaded(img_bag, return_features=False)
     assert torch.allclose(out1, out2, atol=1e-6)
 
 

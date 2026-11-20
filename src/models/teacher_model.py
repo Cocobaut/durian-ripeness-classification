@@ -37,7 +37,12 @@ import torch.nn as nn
 
 from src.models.audio_backbone import AudioBackbone
 from src.models.sensor_backbone import SensorBackbone
-from src.models.vision_backbone import VISION_MODEL_NAME, VisionBackbone
+from src.models.vision_backbone import (
+    VISION_ATTN_HIDDEN_DIM,
+    VISION_EMBED_DIM,
+    VISION_MODEL_NAME,
+    VisionBackbone,
+)
 
 MODALITIES = ("vision", "audio", "sensor")
 
@@ -55,7 +60,10 @@ class TeacherConfig:
     num_attn_layers: int = 1
     vision_model_name: str = VISION_MODEL_NAME
     vision_drop_path: float = 0.2
-    vision_dim: int = 1024
+    vision_dim: int = VISION_EMBED_DIM  # 256-d F_rgb from Projection + LightweightGatedAttention
+    vision_attn_hidden_dim: int = VISION_ATTN_HIDDEN_DIM  # 128
+    vision_proj_dropout: float = 0.25
+    vision_attn_dropout: float = 0.1
     audio_dim: int = 512
     sensor_input_dim: int = 21
     sensor_hidden_dims: List[int] = field(default_factory=lambda: [64, 48])
@@ -227,7 +235,15 @@ class MultiModalTeacher(nn.Module):
 
         self.config = config
         c = self.config
-        self.vision_backbone = VisionBackbone(c.vision_model_name, pretrained=False, drop_path_rate=c.vision_drop_path)
+        self.vision_backbone = VisionBackbone(
+            c.vision_model_name,
+            pretrained=False,
+            drop_path_rate=c.vision_drop_path,
+            embed_dim=c.vision_dim,
+            attn_hidden_dim=c.vision_attn_hidden_dim,
+            proj_dropout=c.vision_proj_dropout,
+            attn_dropout=c.vision_attn_dropout,
+        )
         self.audio_backbone = AudioBackbone(pretrained=False)
         self.sensor_backbone = SensorBackbone(
             input_dim=c.sensor_input_dim,
@@ -404,7 +420,9 @@ def build_teacher_from_checkpoint(
 ) -> MultiModalTeacher:
     """Reconstruct Teacher from `best_teacher.pth` (for eval_teacher.py and Student distillation)."""
     ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
-    model = MultiModalTeacher(TeacherConfig(**ckpt.get("teacher_config", {})))
+    raw_cfg = dict(ckpt.get("teacher_config", {}))
+    valid_cfg = {k: v for k, v in raw_cfg.items() if k in TeacherConfig.__dataclass_fields__}
+    model = MultiModalTeacher(TeacherConfig(**valid_cfg))
     model.load_state_dict(ckpt["model_state_dict"], strict=True)
     model.to(device)
     if eval_mode:
