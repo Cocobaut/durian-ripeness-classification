@@ -711,3 +711,78 @@ def test_train_student_main_smoke_v2_recipe(tmp_path, monkeypatch):
     last = torch.load(save_path.with_name("smoke_last_student.pth"), map_location="cpu", weights_only=False)
     assert last["ema_state_dict"] is not None
     assert (results_dir / "smoke_val_metrics.json").is_file()
+
+
+# ------------------------------------------------------------------------------
+# 10. Train+Val distillation, fixed-epoch selection, seed ensemble
+# ------------------------------------------------------------------------------
+def test_parse_train_splits_and_last_selection():
+    assert train_student.parse_train_splits("train") == ("train",)
+    assert train_student.parse_train_splits("train, val") == ("train", "valid")
+    assert train_student.parse_train_splits("train,valid,train") == ("train", "valid")
+    with pytest.raises(ValueError):
+        train_student.parse_train_splits("valid")
+    with pytest.raises(ValueError):
+        train_student.parse_train_splits("train,test")  # never train on Test
+    best = {"fruit_macro_f1": 0.9, "val_loss": 0.1}
+    assert train_student.is_better({"fruit_macro_f1": 0.1, "val_loss": 9.0}, best, "last")
+
+
+def test_student_ensemble_averages_probabilities(tmp_path):
+    torch.manual_seed(0)
+    a, b = tiny_student().eval(), tiny_student().eval()
+    paths = []
+    for i, m in enumerate((a, b)):
+        p = tmp_path / f"s{i}.pth"
+        torch.save(student_checkpoint_dict(m, epoch=1), p)
+        paths.append(p)
+
+    single = eval_student.load_students(paths[0], torch.device("cpu"))
+    assert isinstance(single, VisionStudent)
+    ens = eval_student.load_students(paths, torch.device("cpu"))
+    assert isinstance(ens, eval_student.StudentEnsemble)
+
+    x = torch.randn(2, 2, 3, IMG, IMG)
+    with torch.no_grad():
+        expected = (torch.softmax(a(x), -1) + torch.softmax(b(x), -1)) / 2
+        got = torch.softmax(ens(x), -1)
+        assert torch.allclose(got, expected, atol=1e-5)
+        ens.tta_enabled = True
+        assert all(m.tta_enabled for m in ens.members)
+        assert ens(x).shape == (2, 3)
+
+
+@needs_manifest
+def test_evaluate_student_split_ensemble(tmp_path):
+    paths = []
+    for i in range(2):
+        p = tmp_path / f"s{i}.pth"
+        torch.save(student_checkpoint_dict(tiny_student().eval(), epoch=1), p)
+        paths.append(p)
+    res = eval_student.evaluate_student_split(
+        paths, MANIFEST, DATA_DIR, "test", tmp_path / "res",
+        batch_size=2, num_workers=0, image_size=IMG, device="cpu", smoke=True, tta=True,
+    )
+    assert 0.0 <= res["metrics"]["fruit_macro_f1"] <= 1.0
+
+
+@needs_manifest
+def test_train_student_main_smoke_trainval_fixed_epochs(tmp_path, monkeypatch):
+    monkeypatch.setattr(train_student, "TEACHER_CKPT_CANDIDATES", [])
+    teacher_ckpt = tmp_path / "best_teacher.pth"
+    torch.save(teacher_checkpoint_dict(tiny_teacher(), epoch=1, val_f1=0.5), teacher_ckpt)
+    results_dir = tmp_path / "results_student"
+    save_path = tmp_path / "ckpt" / "best_student.pth"
+    monkeypatch.setattr(sys, "argv", [
+        "train_student.py", "--smoke", "--teacher-ckpt", str(teacher_ckpt),
+        "--student-backbone", "resnet18", "--proj-hidden-dim", "64", "--image-size", str(IMG),
+        "--batch-size", "2", "--accum-steps", "1", "--num-workers", "0", "--device", "cpu", "--no-amp", "--fresh",
+        "--feat-target", "vision", "--feat-loss-type", "cosine_relational", "--kd-weighting", "teacher_correct",
+        "--ema-decay", "0.9", "--train-splits", "train,valid", "--select-metric", "last",
+        "--save-path", str(save_path), "--results-dir", str(results_dir), "--skip-final-eval",
+    ])
+    train_student.main()
+    ckpt = torch.load(save_path.with_name("smoke_student.pth"), map_location="cpu", weights_only=False)
+    assert ckpt["epoch"] == 2, "Fixed-epoch mode must keep the final epoch"
+    cfg = json.loads((results_dir / "smoke_config.json").read_text(encoding="utf-8"))
+    assert cfg["train_splits"] == "train,valid"

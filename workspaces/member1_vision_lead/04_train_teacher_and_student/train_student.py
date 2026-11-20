@@ -51,7 +51,7 @@ import pandas as pd  # noqa: E402
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 from sklearn.metrics import accuracy_score, f1_score  # noqa: E402
-from torch.utils.data import DataLoader, Subset  # noqa: E402
+from torch.utils.data import ConcatDataset, DataLoader, Subset  # noqa: E402
 
 from src.datasets.multimodal_dataset import build_multimodal_datasets, worker_init_fn  # noqa: E402
 from src.datasets.sensor_dataset import SENSOR_PREPROCESSOR_PATH, SENSOR_RESULTS_DIR  # noqa: E402
@@ -158,7 +158,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--patience", type=int, default=10, help="Early stopping patience in Phase 2")
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--select-metric", default="fruit_macro_f1",
-                   choices=["sample_macro_f1", "fruit_macro_f1", "val_loss"])
+                   choices=["sample_macro_f1", "fruit_macro_f1", "val_loss", "last"],
+                   help="'last' = fixed-epoch training: keep the final epoch (required when Val is in --train-splits)")
+    p.add_argument("--train-splits", default="train",
+                   help="Comma-separated splits used for distillation, e.g. 'train' or 'train,valid' "
+                        "(Teacher was trained on Train only, so its Val soft labels are genuinely out-of-sample)")
     p.add_argument("--ema-decay", type=float, default=0.0,
                    help="If > 0, keep an EMA of Student weights (e.g. 0.99) and validate/save the EMA model")
     p.add_argument("--no-tta", action="store_true",
@@ -416,8 +420,25 @@ def validate_student(
     }
 
 
+def parse_train_splits(value: str) -> tuple:
+    """'train,valid' -> ('train', 'valid'); 'val' is normalized to 'valid'."""
+    splits = []
+    for s in value.split(","):
+        s = s.strip().lower()
+        if not s:
+            continue
+        s = "valid" if s == "val" else s
+        if s not in ("train", "valid"):
+            raise ValueError(f"--train-splits only supports 'train' and 'valid', got {s!r}")
+        if s not in splits:
+            splits.append(s)
+    if "train" not in splits:
+        raise ValueError("--train-splits must include 'train'")
+    return tuple(splits)
+
+
 def is_better(metrics: Dict[str, float], best: Dict[str, float], key: str) -> bool:
-    if not best:
+    if not best or key == "last":
         return True
     if key == "val_loss":
         return metrics["val_loss"] < best["val_loss"] - 1e-6
@@ -467,7 +488,12 @@ def main() -> None:
     results_dir = resolve_path(args.results_dir)
     save_path = resolve_path(args.save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    last_name = "smoke_last_student.pth" if args.smoke else "last_student.pth"
+    if args.smoke:
+        last_name = "smoke_last_student.pth"
+    elif save_path.name == "best_student.pth":
+        last_name = "last_student.pth"
+    else:  # e.g. student_trainval_s43.pth -> last_student_trainval_s43.pth (one resume file per run/seed)
+        last_name = f"last_{save_path.stem}.pth"
     last_path = resolve_path(args.resume) if args.resume else save_path.with_name(last_name)
     resuming = (not args.fresh) and (not args.eval_only) and last_path.is_file()
 
@@ -517,23 +543,33 @@ def main() -> None:
 
     # ---- 2. Build Datasets -----------------------------------------------------
     # Train requires MultimodalDataset (so Teacher gets img + audio + sensor), filtered to samples with real RGB images
+    train_splits = parse_train_splits(args.train_splits)
     mm_datasets = build_multimodal_datasets(
         resolve_path(args.manifest),
         resolve_path(args.data_dir),
         image_size=args.image_size,
         seed=args.seed,
-        splits=("train",),
+        splits=train_splits,
         sensor_cache_dir=resolve_path(args.sensor_cache_dir),
         sensor_preprocessor_path=resolve_path(args.sensor_preprocessor),
+        train_mode_splits=train_splits,
     )
-    full_train_ds = mm_datasets["train"]
-    rgb_train_indices = filter_rgb_indices(full_train_ds)
-    train_labels = [full_train_ds.samples[i]["label"] for i in rgb_train_indices]
-    train_ds = Subset(full_train_ds, rgb_train_indices)
+    subsets, train_labels = [], []
+    for sp in train_splits:
+        ds_sp = mm_datasets[sp]
+        idx = filter_rgb_indices(ds_sp)
+        train_labels += [ds_sp.samples[i]["label"] for i in idx]
+        subsets.append(Subset(ds_sp, idx))
+    train_ds = subsets[0] if len(subsets) == 1 else ConcatDataset(subsets)
 
     # Val uses ImageDataset only (RGB-Only), matching Student's deployment conditions
     val_ds = build_vision_eval_dataset(args.manifest, args.data_dir, split="valid", image_size=args.image_size)
-    logger.info(f"[data] Train RGB samples: {len(train_ds)} | Val RGB samples: {len(val_ds)}")
+    logger.info(f"[data] Train splits {train_splits} -> RGB samples: {len(train_ds)} | Val RGB samples: {len(val_ds)}")
+    if "valid" in train_splits:
+        logger.warning(
+            "Val fruits are part of the training set: validation metrics are in-sample (monitoring only). "
+            "Use --select-metric last (fixed-epoch training) and judge the model on Test only."
+        )
 
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
@@ -679,7 +715,10 @@ def main() -> None:
                 ),
                 save_path,
             )
-            logger.info(f"  -> Saved best Student ({args.select_metric} = {row[args.select_metric]:.4f}): {save_path}")
+            if args.select_metric == "last":
+                logger.info(f"  -> Saved Student (fixed-epoch mode, epoch {row['epoch']}): {save_path}")
+            else:
+                logger.info(f"  -> Saved best Student ({args.select_metric} = {row[args.select_metric]:.4f}): {save_path}")
             return True
         return False
 

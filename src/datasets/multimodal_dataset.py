@@ -264,11 +264,15 @@ def build_multimodal_datasets(
     sensor_feature_cols=OFFICIAL_SENSOR_COLS,
     seed: int = 42,
     verbose: bool = True,
+    train_mode_splits: Optional[Iterable[str]] = None,
 ) -> Dict[str, MultimodalDataset]:
     """Build MultimodalDataset for the requested splits (train => view subsampling + augmentation enabled).
 
     The sensor preprocessor is always loaded/fit on the Train split (even when only Test is requested).
+    `train_mode_splits` (default: only "train") lists splits built in training mode, e.g. ("train", "valid")
+    when the Student is trained on Train + Val.
     """
+    train_mode = {split_dir_name(s) for s in (train_mode_splits or ("train",))}
     manifest = pd.read_csv(manifest_path)
     data_dir = Path(data_dir)
 
@@ -291,7 +295,7 @@ def build_multimodal_datasets(
             data_dir,
             vecs,
             bank,
-            train=(sp == "train"),
+            train=(sp in train_mode),
             image_size=image_size,
             sensor_dim=len(sensor_feature_cols),
             seed=seed,

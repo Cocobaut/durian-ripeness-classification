@@ -22,7 +22,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Sequence, Union
 
 THIS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = THIS_DIR.parents[2]
@@ -45,6 +45,43 @@ if str(EVAL_TEACHER_DIR) not in sys.path:
 from eval_teacher import TeacherEvaluator, TeacherEvaluatorConfig  # noqa: E402
 
 logger = logging.getLogger("eval_student")
+
+
+class StudentEnsemble(torch.nn.Module):
+    """Average the softmax probabilities of several Students (e.g. different seeds).
+
+    Returns log(mean probs) so downstream code that applies softmax recovers the averaged probabilities.
+    """
+
+    def __init__(self, members: List[VisionStudent]) -> None:
+        super().__init__()
+        self.members = torch.nn.ModuleList(members)
+
+    @property
+    def tta_enabled(self) -> bool:
+        return all(m.tta_enabled for m in self.members)
+
+    @tta_enabled.setter
+    def tta_enabled(self, value: bool) -> None:
+        for m in self.members:
+            m.tta_enabled = bool(value)
+
+    def forward(self, img: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        probs = torch.stack([torch.softmax(m(img, *args, **kwargs).float(), dim=-1) for m in self.members])
+        return torch.log(probs.mean(dim=0).clamp_min(1e-12))
+
+
+def load_students(
+    ckpt_paths: Union[str, Path, Sequence[Union[str, Path]]],
+    device: torch.device,
+) -> torch.nn.Module:
+    """One checkpoint -> VisionStudent; several -> StudentEnsemble."""
+    paths = [ckpt_paths] if isinstance(ckpt_paths, (str, Path)) else list(ckpt_paths)
+    models = [build_student_from_checkpoint(resolve_path(p), device=device, eval_mode=True) for p in paths]
+    if len(models) == 1:
+        return models[0]
+    logger.info(f"Ensembling {len(models)} Students: {[str(p) for p in paths]}")
+    return StudentEnsemble(models).to(device).eval()
 
 
 class _ManifestFallbackImageDataset(torch.utils.data.Dataset):
@@ -91,7 +128,7 @@ def build_vision_eval_dataset(
 
 
 def evaluate_student_split(
-    ckpt_path: Union[str, Path],
+    ckpt_path: Union[str, Path, Sequence[Union[str, Path]]],
     manifest_path: Union[str, Path],
     data_dir: Union[str, Path],
     split: str,
@@ -102,7 +139,7 @@ def evaluate_student_split(
     device: Union[str, torch.device] = "cpu",
     smoke: bool = False,
     seed: int = 42,
-    model: Optional[VisionStudent] = None,
+    model: Optional[torch.nn.Module] = None,
     tta: bool = True,
 ) -> Dict:
     """Evaluate Multi-View VisionStudent on `valid` or `test` split using RGB image bags only.
@@ -110,7 +147,8 @@ def evaluate_student_split(
     `tta=True` applies the same per-view 3-crop/flip TTA as the unimodal Vision baseline evaluation
     (0.5 * original + 0.3 * hflip + 0.2 * 95% zoom), so Student and baseline are compared fairly.
     """
-    ckpt_path = resolve_path(ckpt_path)
+    ckpt_list = [ckpt_path] if isinstance(ckpt_path, (str, Path)) else list(ckpt_path)
+    ckpt_path = resolve_path(ckpt_list[0])
     output_dir = resolve_path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     device_obj = torch.device(device)
@@ -128,7 +166,7 @@ def evaluate_student_split(
         worker_init_fn=worker_init_fn,
     )
     if model is None:
-        model = build_student_from_checkpoint(ckpt_path, device=device_obj, eval_mode=True)
+        model = load_students(ckpt_list, device_obj)
     else:
         model.to(device_obj).eval()
     model.tta_enabled = bool(tta)
@@ -295,7 +333,8 @@ def generate_benchmark_comparison(
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Independent evaluation of Multi-View Vision-Only Student model (Stage 2)")
-    p.add_argument("--checkpoint", default="checkpoints/studentmodal/best_student.pth")
+    p.add_argument("--checkpoint", nargs="+", default=["checkpoints/studentmodal/best_student.pth"],
+                   help="One Student checkpoint, or several to evaluate their probability-averaged ensemble")
     p.add_argument("--manifest", default="data/final/final_multimodal_manifest.csv")
     p.add_argument("--data-dir", default="data/final")
     p.add_argument("--split", default="test", choices=["val", "valid", "test"])
