@@ -1,61 +1,61 @@
-[2026-11-21 03:32:48] ==============================================================================
-[2026-11-21 03:32:48] TRAINING VISION-ONLY STUDENT VIA CMKD (STAGE 2)
-[2026-11-21 03:32:48] Device: cuda | AMP: True (torch.bfloat16) | batch 4 x accum 2
-[2026-11-21 03:32:48] Student backbone : convnextv2_base.fcmae_ft_in1k
-[2026-11-21 03:32:48] Distill weights  : alpha=1.0 (CE) | beta=0.5 (KD, T=3.0) | gamma=0.25 (Feat: relational)
-[2026-11-21 03:32:48] Best student ckpt: /content/durian-ripeness-classification/checkpoints/studentmodal/best_student.pth
-[2026-11-21 03:32:48] ==============================================================================
-[2026-11-21 03:32:48] Loading Frozen Teacher from: /content/durian-ripeness-classification/checkpoints/teachermodal/best_teacher.pth
-[2026-11-21 03:32:50] L_feat target: Teacher 'fused' feature (256-d) | KD weighting: teacher_confidence | EMA: off | TTA: True
-[2026-11-21 03:33:20] [data] Train splits ('train',) (dedup_fruits=True) -> RGB samples: 124 | Val RGB samples: 24
-[2026-11-21 03:33:23] Initialized Student VisionBackbone from unimodal checkpoint: /content/durian-ripeness-classification/checkpoints/unimodal/vision/best_convnextv2_multiview.pth
-[2026-11-21 03:33:23] Student: 88.3M params | F_rgb = 256 -> f_proj = 256
-[2026-11-21 03:33:23] Class weights (Train RGB): {'Unripe': np.float32(1.06), 'Ripe': np.float32(1.008), 'Overripe': np.float32(0.939)}
-[2026-11-21 03:33:23] >>> PHASE 1 - WARM-UP FREEZE (epoch 1..2): freezing VisionBackbone
-[2026-11-21 03:33:39]   phase1 ep 1 | batch 20/31 | loss 0.8492 (CE 0.452, KD 0.725, Feat 0.137) | 16s
-[2026-11-21 03:33:44]   phase1 ep 1 | batch 31/31 | loss 0.7999 (CE 0.447, KD 0.648, Feat 0.117) | 21s
-[2026-11-21 03:33:51] [phase1] Epoch 1/25 | train loss 0.7999 (CE 0.447, KD 0.648, Feat 0.117) | val loss 0.7223 | val F1 sample 0.7859 / fruit 0.7859
-[2026-11-21 03:33:52]   -> Saved best Student (fruit_macro_f1 = 0.7859): /content/durian-ripeness-classification/checkpoints/studentmodal/best_student.pth
-[2026-11-21 03:34:02]   phase1 ep 2 | batch 20/31 | loss 0.7191 (CE 0.455, KD 0.477, Feat 0.101) | 9s
-[2026-11-21 03:34:08]   phase1 ep 2 | batch 31/31 | loss 0.7071 (CE 0.449, KD 0.465, Feat 0.104) | 15s
-[2026-11-21 03:34:12] [phase1] Epoch 2/25 | train loss 0.7071 (CE 0.449, KD 0.465, Feat 0.104) | val loss 0.6961 | val F1 sample 0.7859 / fruit 0.7859
-[2026-11-21 03:34:13]   -> Saved best Student (fruit_macro_f1 = 0.7859): /content/durian-ripeness-classification/checkpoints/studentmodal/best_student.pth
-[2026-11-21 03:34:14] >>> PHASE 2 - JOINT DISTILLATION (epoch 3..25): backbone LR 2e-05, head LR 0.0002
-[2026-11-21 03:35:09]   phase2 ep 3 | batch 20/31 | loss 0.9205 (CE 0.698, KD 0.384, Feat 0.121) | 55s
-[2026-11-21 03:35:14]   phase2 ep 3 | batch 31/31 | loss 0.9506 (CE 0.727, KD 0.387, Feat 0.121) | 60s
-[2026-11-21 03:35:18] [phase2] Epoch 3/25 | train loss 0.9506 (CE 0.727, KD 0.387, Feat 0.121) | val loss 0.7232 | val F1 sample 0.6813 / fruit 0.6813
-[2026-11-21 03:35:52]   phase2 ep 4 | batch 20/31 | loss 0.7151 (CE 0.567, KD 0.243, Feat 0.106) | 31s
-[2026-11-21 03:35:57]   phase2 ep 4 | batch 31/31 | loss 0.7272 (CE 0.577, KD 0.249, Feat 0.103) | 36s
-[2026-11-21 03:36:01] [phase2] Epoch 4/25 | train loss 0.7272 (CE 0.577, KD 0.249, Feat 0.103) | val loss 0.8409 | val F1 sample 0.5881 / fruit 0.5881
-[2026-11-21 03:36:41]   phase2 ep 5 | batch 20/31 | loss 0.7191 (CE 0.567, KD 0.254, Feat 0.099) | 35s
-[2026-11-21 03:36:46]   phase2 ep 5 | batch 31/31 | loss 0.7700 (CE 0.619, KD 0.252, Feat 0.101) | 40s
-[2026-11-21 03:36:50] [phase2] Epoch 5/25 | train loss 0.7700 (CE 0.619, KD 0.252, Feat 0.101) | val loss 0.7747 | val F1 sample 0.6506 / fruit 0.6506
-[2026-11-21 03:37:25]   phase2 ep 6 | batch 20/31 | loss 0.6761 (CE 0.547, KD 0.202, Feat 0.113) | 32s
-[2026-11-21 03:37:30]   phase2 ep 6 | batch 31/31 | loss 0.7117 (CE 0.575, KD 0.220, Feat 0.106) | 37s
-[2026-11-21 03:37:33] [phase2] Epoch 6/25 | train loss 0.7117 (CE 0.575, KD 0.220, Feat 0.106) | val loss 0.7261 | val F1 sample 0.6543 / fruit 0.6543
-[2026-11-21 03:37:46]   phase2 ep 7 | batch 20/31 | loss 0.7472 (CE 0.596, KD 0.245, Feat 0.115) | 10s
-[2026-11-21 03:38:13]   phase2 ep 7 | batch 31/31 | loss 0.7646 (CE 0.613, KD 0.246, Feat 0.112) | 36s
-[2026-11-21 03:38:16] [phase2] Epoch 7/25 | train loss 0.7646 (CE 0.613, KD 0.246, Feat 0.112) | val loss 0.8186 | val F1 sample 0.6741 / fruit 0.6741
-[2026-11-21 03:38:36]   phase2 ep 8 | batch 20/31 | loss 0.6573 (CE 0.555, KD 0.163, Feat 0.084) | 17s
-[2026-11-21 03:38:41]   phase2 ep 8 | batch 31/31 | loss 0.7102 (CE 0.587, KD 0.201, Feat 0.090) | 22s
-[2026-11-21 03:39:07] [phase2] Epoch 8/25 | train loss 0.7102 (CE 0.587, KD 0.201, Feat 0.090) | val loss 0.7277 | val F1 sample 0.7100 / fruit 0.7100
-[2026-11-21 03:39:22]   phase2 ep 9 | batch 20/31 | loss 0.6963 (CE 0.571, KD 0.207, Feat 0.086) | 10s
-[2026-11-21 03:39:27]   phase2 ep 9 | batch 31/31 | loss 0.6814 (CE 0.552, KD 0.219, Feat 0.079) | 15s
-[2026-11-21 03:39:31] [phase2] Epoch 9/25 | train loss 0.6814 (CE 0.552, KD 0.219, Feat 0.079) | val loss 0.6293 | val F1 sample 0.7778 / fruit 0.7778
-[2026-11-21 03:39:44]   phase2 ep 10 | batch 20/31 | loss 0.6083 (CE 0.495, KD 0.185, Feat 0.082) | 10s
-[2026-11-21 03:40:10]   phase2 ep 10 | batch 31/31 | loss 0.6407 (CE 0.522, KD 0.196, Feat 0.081) | 37s
-[2026-11-21 03:40:14] [phase2] Epoch 10/25 | train loss 0.6407 (CE 0.522, KD 0.196, Feat 0.081) | val loss 0.8130 | val F1 sample 0.7073 / fruit 0.7073
-[2026-11-21 03:40:49]   phase2 ep 11 | batch 20/31 | loss 0.6075 (CE 0.491, KD 0.196, Feat 0.071) | 32s
-[2026-11-21 03:40:54]   phase2 ep 11 | batch 31/31 | loss 0.6198 (CE 0.498, KD 0.206, Feat 0.077) | 37s
-[2026-11-21 03:40:58] [phase2] Epoch 11/25 | train loss 0.6198 (CE 0.498, KD 0.206, Feat 0.077) | val loss 0.8418 | val F1 sample 0.6677 / fruit 0.6677
-[2026-11-21 03:41:11]   phase2 ep 12 | batch 20/31 | loss 0.6632 (CE 0.555, KD 0.188, Feat 0.055) | 10s
-[2026-11-21 03:41:15]   phase2 ep 12 | batch 31/31 | loss 0.6571 (CE 0.546, KD 0.195, Feat 0.055) | 15s
-[2026-11-21 03:41:41] [phase2] Epoch 12/25 | train loss 0.6571 (CE 0.546, KD 0.195, Feat 0.055) | val loss 0.7932 | val F1 sample 0.6358 / fruit 0.6358
-[2026-11-21 03:41:47] Early stopping after 10 epochs without improvement.
-[2026-11-21 03:41:47] Best epoch 2 (phase1): val sample F1 0.7859 | fruit F1 0.7859 | val loss 0.6961
-[2026-11-21 03:41:47] >>> Independent evaluation of best Student on Val (RGB-only) ...
-[2026-11-21 03:42:24] VAL  | sample Acc 0.7917 | sample F1 0.7859 | fruit Acc 0.7917 | fruit F1 0.7859
-[2026-11-21 03:42:24] >>> Independent evaluation of best Student on Test (RGB-only) ...
-[2026-11-21 03:42:38] TEST | sample Acc 0.5417 | sample F1 0.5185 | fruit Acc 0.5417 | fruit F1 0.5185
-[2026-11-21 03:42:38] Exported benchmark comparison table: /content/durian-ripeness-classification/workspaces/member1_vision_lead/04_train_teacher_and_student/results_student/benchmark_comparison.md
-[2026-11-21 03:42:38] VISION-ONLY STUDENT TRAINING COMPLETE.
+[2026-11-21 04:13:36] ==============================================================================
+[2026-11-21 04:13:36] TRAINING VISION-ONLY STUDENT VIA CMKD (STAGE 2)
+[2026-11-21 04:13:36] Device: cuda | AMP: True (torch.bfloat16) | batch 4 x accum 2
+[2026-11-21 04:13:36] Student backbone : convnextv2_base.fcmae_ft_in1k
+[2026-11-21 04:13:36] Distill weights  : alpha=1.0 (CE) | beta=0.5 (KD, T=3.0) | gamma=0.25 (Feat: relational)
+[2026-11-21 04:13:36] Best student ckpt: /content/durian-ripeness-classification/checkpoints/studentmodal/best_student.pth
+[2026-11-21 04:13:36] ==============================================================================
+[2026-11-21 04:13:36] Loading Frozen Teacher from: /content/durian-ripeness-classification/checkpoints/teachermodal/best_teacher.pth
+[2026-11-21 04:13:38] L_feat target: Teacher 'fused' feature (256-d) | KD weighting: teacher_confidence | EMA: off | TTA: True
+[2026-11-21 04:14:08] [data] Train splits ('train',) (dedup_fruits=True) -> RGB samples: 124 | Val RGB samples: 24
+[2026-11-21 04:14:12] Initialized Student VisionBackbone from unimodal checkpoint: /content/durian-ripeness-classification/checkpoints/unimodal/vision/best_convnextv2_multiview.pth
+[2026-11-21 04:14:12] Student: 88.3M params | F_rgb = 256 -> f_proj = 256
+[2026-11-21 04:14:12] Class weights (Train RGB): {'Unripe': np.float32(1.06), 'Ripe': np.float32(1.008), 'Overripe': np.float32(0.939)}
+[2026-11-21 04:14:12] >>> PHASE 1 - WARM-UP FREEZE (epoch 1..2): freezing VisionBackbone
+[2026-11-21 04:14:27]   phase1 ep 1 | batch 20/31 | loss 0.8492 (CE 0.452, KD 0.725, Feat 0.137) | 16s
+[2026-11-21 04:14:32]   phase1 ep 1 | batch 31/31 | loss 0.7999 (CE 0.447, KD 0.648, Feat 0.117) | 21s
+[2026-11-21 04:14:40] [phase1] Epoch 1/25 | train loss 0.7999 (CE 0.447, KD 0.648, Feat 0.117) | val loss 0.7223 | val F1 sample 0.7859 / fruit 0.7859
+[2026-11-21 04:14:40]   -> Saved best Student (fruit_macro_f1 = 0.7859): /content/durian-ripeness-classification/checkpoints/studentmodal/best_student.pth
+[2026-11-21 04:14:51]   phase1 ep 2 | batch 20/31 | loss 0.7191 (CE 0.455, KD 0.477, Feat 0.101) | 9s
+[2026-11-21 04:15:03]   phase1 ep 2 | batch 31/31 | loss 0.7071 (CE 0.449, KD 0.465, Feat 0.104) | 22s
+[2026-11-21 04:15:20] [phase1] Epoch 2/25 | train loss 0.7071 (CE 0.449, KD 0.465, Feat 0.104) | val loss 0.6961 | val F1 sample 0.7859 / fruit 0.7859
+[2026-11-21 04:15:21]   -> Saved best Student (fruit_macro_f1 = 0.7859): /content/durian-ripeness-classification/checkpoints/studentmodal/best_student.pth
+[2026-11-21 04:15:22] >>> PHASE 2 - JOINT DISTILLATION (epoch 3..25): backbone LR 2e-05, head LR 0.0002
+[2026-11-21 04:16:17]   phase2 ep 3 | batch 20/31 | loss 0.9204 (CE 0.698, KD 0.384, Feat 0.121) | 55s
+[2026-11-21 04:16:22]   phase2 ep 3 | batch 31/31 | loss 0.9508 (CE 0.727, KD 0.388, Feat 0.120) | 60s
+[2026-11-21 04:16:26] [phase2] Epoch 3/25 | train loss 0.9508 (CE 0.727, KD 0.388, Feat 0.120) | val loss 0.7212 | val F1 sample 0.6813 / fruit 0.6813
+[2026-11-21 04:17:00]   phase2 ep 4 | batch 20/31 | loss 0.7164 (CE 0.568, KD 0.243, Feat 0.107) | 31s
+[2026-11-21 04:17:05]   phase2 ep 4 | batch 31/31 | loss 0.7273 (CE 0.577, KD 0.249, Feat 0.103) | 36s
+[2026-11-21 04:17:09] [phase2] Epoch 4/25 | train loss 0.7273 (CE 0.577, KD 0.249, Feat 0.103) | val loss 0.8422 | val F1 sample 0.5881 / fruit 0.5881
+[2026-11-21 04:17:46]   phase2 ep 5 | batch 20/31 | loss 0.7231 (CE 0.570, KD 0.257, Feat 0.100) | 34s
+[2026-11-21 04:17:51]   phase2 ep 5 | batch 31/31 | loss 0.7752 (CE 0.623, KD 0.255, Feat 0.101) | 39s
+[2026-11-21 04:17:54] [phase2] Epoch 5/25 | train loss 0.7752 (CE 0.623, KD 0.255, Feat 0.101) | val loss 0.7706 | val F1 sample 0.6462 / fruit 0.6462
+[2026-11-21 04:18:07]   phase2 ep 6 | batch 20/31 | loss 0.6794 (CE 0.547, KD 0.208, Feat 0.113) | 10s
+[2026-11-21 04:18:12]   phase2 ep 6 | batch 31/31 | loss 0.7163 (CE 0.576, KD 0.227, Feat 0.106) | 15s
+[2026-11-21 04:18:38] [phase2] Epoch 6/25 | train loss 0.7163 (CE 0.576, KD 0.227, Feat 0.106) | val loss 0.7318 | val F1 sample 0.5746 / fruit 0.5746
+[2026-11-21 04:18:50]   phase2 ep 7 | batch 20/31 | loss 0.7584 (CE 0.604, KD 0.250, Feat 0.118) | 10s
+[2026-11-21 04:18:55]   phase2 ep 7 | batch 31/31 | loss 0.7752 (CE 0.621, KD 0.252, Feat 0.115) | 15s
+[2026-11-21 04:18:59] [phase2] Epoch 7/25 | train loss 0.7752 (CE 0.621, KD 0.252, Feat 0.115) | val loss 0.8336 | val F1 sample 0.5940 / fruit 0.5940
+[2026-11-21 04:19:42]   phase2 ep 8 | batch 20/31 | loss 0.6610 (CE 0.558, KD 0.163, Feat 0.085) | 18s
+[2026-11-21 04:19:46]   phase2 ep 8 | batch 31/31 | loss 0.7124 (CE 0.591, KD 0.197, Feat 0.090) | 23s
+[2026-11-21 04:19:50] [phase2] Epoch 8/25 | train loss 0.7124 (CE 0.591, KD 0.197, Feat 0.090) | val loss 0.7005 | val F1 sample 0.7003 / fruit 0.7003
+[2026-11-21 04:20:26]   phase2 ep 9 | batch 20/31 | loss 0.6937 (CE 0.567, KD 0.210, Feat 0.086) | 10s
+[2026-11-21 04:20:31]   phase2 ep 9 | batch 31/31 | loss 0.6870 (CE 0.554, KD 0.226, Feat 0.079) | 15s
+[2026-11-21 04:20:35] [phase2] Epoch 9/25 | train loss 0.6870 (CE 0.554, KD 0.226, Feat 0.079) | val loss 0.6230 | val F1 sample 0.7709 / fruit 0.7709
+[2026-11-21 04:21:10]   phase2 ep 10 | batch 20/31 | loss 0.6099 (CE 0.497, KD 0.185, Feat 0.083) | 32s
+[2026-11-21 04:21:14]   phase2 ep 10 | batch 31/31 | loss 0.6407 (CE 0.521, KD 0.198, Feat 0.082) | 37s
+[2026-11-21 04:21:19] [phase2] Epoch 10/25 | train loss 0.6407 (CE 0.521, KD 0.198, Feat 0.082) | val loss 0.8218 | val F1 sample 0.7073 / fruit 0.7073
+[2026-11-21 04:21:53]   phase2 ep 11 | batch 20/31 | loss 0.6124 (CE 0.495, KD 0.199, Feat 0.070) | 32s
+[2026-11-21 04:21:58]   phase2 ep 11 | batch 31/31 | loss 0.6243 (CE 0.501, KD 0.209, Feat 0.076) | 37s
+[2026-11-21 04:22:02] [phase2] Epoch 11/25 | train loss 0.6243 (CE 0.501, KD 0.209, Feat 0.076) | val loss 0.8600 | val F1 sample 0.6264 / fruit 0.6264
+[2026-11-21 04:22:36]   phase2 ep 12 | batch 20/31 | loss 0.6653 (CE 0.556, KD 0.190, Feat 0.056) | 32s
+[2026-11-21 04:22:41]   phase2 ep 12 | batch 31/31 | loss 0.6595 (CE 0.548, KD 0.196, Feat 0.056) | 37s
+[2026-11-21 04:22:45] [phase2] Epoch 12/25 | train loss 0.6595 (CE 0.548, KD 0.196, Feat 0.056) | val loss 0.7842 | val F1 sample 0.6358 / fruit 0.6358
+[2026-11-21 04:22:48] Early stopping after 10 epochs without improvement.
+[2026-11-21 04:22:52] Best epoch 2 (phase1): val sample F1 0.7859 | fruit F1 0.7859 | val loss 0.6961
+[2026-11-21 04:22:52] >>> Independent evaluation of best Student on Val (RGB-only) ...
+[2026-11-21 04:23:22] VAL  | sample Acc 0.7917 | sample F1 0.7859 | fruit Acc 0.7917 | fruit F1 0.7859
+[2026-11-21 04:23:22] >>> Independent evaluation of best Student on Test (RGB-only) ...
+[2026-11-21 04:23:36] TEST | sample Acc 0.5417 | sample F1 0.5185 | fruit Acc 0.5417 | fruit F1 0.5185
+[2026-11-21 04:23:36] Exported benchmark comparison table: /content/durian-ripeness-classification/workspaces/member1_vision_lead/04_train_teacher_and_student/results_student/benchmark_comparison.md
+[2026-11-21 04:23:36] VISION-ONLY STUDENT TRAINING COMPLETE.
