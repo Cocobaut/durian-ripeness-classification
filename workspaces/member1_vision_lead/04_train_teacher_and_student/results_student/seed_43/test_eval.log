@@ -1,0 +1,10 @@
+[2026-11-20 22:19:03,357] [INFO] === STARTING FULL TEACHER EVALUATION PIPELINE ===
+[2026-11-20 22:19:03,358] [INFO] model=vision_student | split=test | input_mode=vision | strategy=mean_prob
+[2026-11-20 22:19:03,358] [INFO] Starting sample-level evaluation (mask_modality=None)...
+[2026-11-20 22:19:18,125] [INFO] Evaluated 24 samples, accuracy = 0.5417
+[2026-11-20 22:19:18,125] [INFO] Aggregating fruit-level predictions (fruit_id) using strategy: mean_prob...
+[2026-11-20 22:19:18,147] [INFO] Aggregated 24 fruits, fruit-level accuracy = 0.5417
+[2026-11-20 22:19:18,798] [INFO] Starting Modality Ablation Study...
+[2026-11-20 22:19:18,798] [INFO] Skipping ablation for unimodal model (input_mode=vision).
+[2026-11-20 22:19:18,804] [INFO] [test] sample Macro-F1 = 0.5311 | fruit Macro-F1 = 0.5311
+[2026-11-20 22:19:18,804] [INFO] === EVALUATION COMPLETE ===

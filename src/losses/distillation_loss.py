@@ -113,6 +113,23 @@ class CrossModalDistillationLoss(nn.Module):
             return log_probs_s.sum() * 0.0
         return (per_sample * weights).sum() / weights.sum() * (t * t)
 
+    def compute_kd_loss_from_probs(
+        self,
+        logits_student: torch.Tensor,
+        probs_teacher: torch.Tensor,
+        weights: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Compute L_KD against pre-computed/mixed Teacher soft probabilities at temperature T."""
+        t = self.temperature
+        log_probs_s = F.log_softmax(logits_student.float() / t, dim=-1)
+        probs_t = probs_teacher.detach().float()
+        if weights is None:
+            return F.kl_div(log_probs_s, probs_t, reduction="batchmean") * (t * t)
+        per_sample = F.kl_div(log_probs_s, probs_t, reduction="none").sum(dim=-1)
+        if weights.sum() <= 0:
+            return log_probs_s.sum() * 0.0
+        return (per_sample * weights).sum() / weights.sum() * (t * t)
+
     @staticmethod
     def _relational_loss(s: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
         """MSE between in-batch cosine-similarity matrices (off-diagonal entries only)."""
@@ -177,6 +194,52 @@ class CrossModalDistillationLoss(nn.Module):
         loss_ce = self.ce_criterion(logits_s, targets) if self.alpha > 0 else logits_s.sum() * 0.0
         loss_kd = self.compute_kd_loss(logits_s, logits_teacher, targets) if self.beta > 0 else logits_s.sum() * 0.0
         loss_feat = self.compute_feat_loss(f_proj_student, f_mm_teacher) if self.gamma > 0 else logits_s.sum() * 0.0
+
+        loss_total = self.alpha * loss_ce + self.beta * loss_kd + self.gamma * loss_feat
+        details = {
+            "loss_total": float(loss_total.detach().item()),
+            "loss_ce": float(loss_ce.detach().item()),
+            "loss_kd": float(loss_kd.detach().item()),
+            "loss_feat": float(loss_feat.detach().item()),
+        }
+        return loss_total, details
+
+    def forward_mixup(
+        self,
+        logits_student: torch.Tensor,
+        logits_teacher_a: torch.Tensor,
+        logits_teacher_b: torch.Tensor,
+        f_proj_student: torch.Tensor,
+        feat_teacher_a: torch.Tensor,
+        feat_teacher_b: torch.Tensor,
+        targets_a: torch.Tensor,
+        targets_b: torch.Tensor,
+        lam: float,
+    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Composite distillation loss for Feature-Space Mixup with mixing coefficient `lam`."""
+        logits_s = logits_student.float()
+        if self.alpha > 0:
+            loss_ce = lam * self.ce_criterion(logits_s, targets_a) + (1.0 - lam) * self.ce_criterion(logits_s, targets_b)
+        else:
+            loss_ce = logits_s.sum() * 0.0
+
+        if self.beta > 0:
+            t = self.temperature
+            probs_a = F.softmax(logits_teacher_a.detach().float() / t, dim=-1)
+            probs_b = F.softmax(logits_teacher_b.detach().float() / t, dim=-1)
+            probs_mix = lam * probs_a + (1.0 - lam) * probs_b
+            wa = self.kd_sample_weights(logits_teacher_a, targets_a)
+            wb = self.kd_sample_weights(logits_teacher_b, targets_b)
+            w_mix = None if (wa is None or wb is None) else (lam * wa + (1.0 - lam) * wb)
+            loss_kd = self.compute_kd_loss_from_probs(logits_s, probs_mix, w_mix)
+        else:
+            loss_kd = logits_s.sum() * 0.0
+
+        if self.gamma > 0:
+            feat_mix = lam * feat_teacher_a.detach().float() + (1.0 - lam) * feat_teacher_b.detach().float()
+            loss_feat = self.compute_feat_loss(f_proj_student, feat_mix)
+        else:
+            loss_feat = logits_s.sum() * 0.0
 
         loss_total = self.alpha * loss_ce + self.beta * loss_kd + self.gamma * loss_feat
         details = {

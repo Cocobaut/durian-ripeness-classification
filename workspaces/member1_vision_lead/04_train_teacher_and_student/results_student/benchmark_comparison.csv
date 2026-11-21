@@ -4,4 +4,4 @@ Model,Test Input,Sample Acc,Sample Macro-F1,Fruit Acc,Fruit Macro-F1
 "3. Audio Unimodal (ResNet-18, 20 fruits)",Audio Only,0.8421052631578947,0.8137254901960783,0.95,0.9373219373219372
 4. Multi-Modal Teacher (Cross-Attention),Multi-View RGB + Audio + Sensor,0.8085106382978723,0.7821248358332756,0.7931034482758621,0.7840909090909092
 4b. Multi-Modal Teacher (same 24 RGB fruits as Student),Multi-View RGB + Audio + Sensor,,,0.7916666666666666,0.7908496732026143
-5. Vision-Only Student (CMKD Multi-View),Multi-View RGB Only,0.5416666666666666,0.5416666666666666,0.5416666666666666,0.5416666666666666
+5. Vision-Only Student (CMKD Multi-View),Multi-View RGB Only,0.5,0.48675610595115243,0.5,0.48675610595115243

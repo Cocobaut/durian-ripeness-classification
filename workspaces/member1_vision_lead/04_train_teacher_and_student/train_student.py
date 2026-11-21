@@ -165,6 +165,16 @@ def parse_args() -> argparse.Namespace:
                         "(Teacher was trained on Train only, so its Val soft labels are genuinely out-of-sample)")
     p.add_argument("--ema-decay", type=float, default=0.0,
                    help="If > 0, keep an EMA of Student weights (e.g. 0.99) and validate/save the EMA model")
+    p.add_argument("--dedup-fruits", action="store_true",
+                   help="Deduplicate MultimodalDataset to 1 sample per RGB fruit per epoch (randomly sampling "
+                        "1 audio file per fruit each epoch) to prevent audio-count bias and flipped class weights")
+    p.add_argument("--mixup-alpha", type=float, default=0.0,
+                   help="Feature-Space Mixup Beta(alpha, alpha) on 256-d F_rgb in Phase 2 (e.g. 0.2; 0 disables)")
+    p.add_argument("--mixup-prob", type=float, default=0.5,
+                   help="Probability of applying Feature-Space Mixup to a Phase 2 batch when --mixup-alpha > 0")
+    p.add_argument("--l2-sp-weight", type=float, default=0.0,
+                   help="L2-SP regularization weight anchoring Student VisionBackbone to its initial unimodal weights "
+                        "during Phase 2 (e.g. 1e-3; 0 disables)")
     p.add_argument("--no-tta", action="store_true",
                    help="Disable 3-view TTA (orig + hflip + 95%% zoom) during validation and final evaluation")
 
@@ -220,6 +230,58 @@ def filter_rgb_indices(multimodal_ds) -> List[int]:
         )
         return list(range(len(multimodal_ds)))
     return indices
+
+
+class FruitDedupMultimodalDataset(torch.utils.data.Dataset):
+    """Wrap a MultimodalDataset so each unique `fruit_id` appears exactly once per epoch.
+
+    When a fruit has multiple audio files (e.g. android + iphone), one is chosen uniformly at random
+    on each access, giving unbiased fruit-level RGB sampling and true fruit-level class weights while
+    still leveraging all audio recordings for Teacher distillation.
+    """
+
+    def __init__(self, base_ds, indices: List[int], seed: int = 42) -> None:
+        self.base_ds = base_ds
+        groups: Dict[str, List[int]] = {}
+        for idx in indices:
+            fid = base_ds.samples[idx]["fruit_id"]
+            groups.setdefault(fid, []).append(idx)
+        self.fruit_ids: List[str] = sorted(groups.keys())
+        self.fruit_groups: List[List[int]] = [groups[fid] for fid in self.fruit_ids]
+        self.labels: List[int] = [int(base_ds.samples[g[0]]["label"]) for g in self.fruit_groups]
+        self.rng = np.random.default_rng(seed)
+
+    def reseed(self, seed: int) -> None:
+        self.rng = np.random.default_rng(seed)
+        if hasattr(self.base_ds, "reseed"):
+            self.base_ds.reseed(seed)
+
+    def __len__(self) -> int:
+        return len(self.fruit_groups)
+
+    def __getitem__(self, i: int):
+        grp = self.fruit_groups[i]
+        chosen = grp[0] if len(grp) == 1 else grp[int(self.rng.integers(len(grp)))]
+        return self.base_ds[chosen]
+
+
+def compute_l2_sp_loss(
+    backbone: torch.nn.Module,
+    anchor_params: Dict[str, torch.Tensor],
+) -> torch.Tensor:
+    """Mean-squared deviation of trainable backbone weights from their initial unimodal snapshot (L2-SP)."""
+    total = None
+    n_elems = 0
+    for name, p in backbone.named_parameters():
+        if not p.requires_grad or name not in anchor_params:
+            continue
+        diff = p.float() - anchor_params[name].to(device=p.device, dtype=torch.float32)
+        term = diff.pow(2).sum()
+        total = term if total is None else (total + term)
+        n_elems += p.numel()
+    if total is None or n_elems == 0:
+        return next(backbone.parameters()).sum() * 0.0
+    return total / float(n_elems)
 
 
 class ModelEMA:
@@ -305,12 +367,19 @@ def train_one_epoch(
     desc: str,
     feat_target: str = "fused",
     ema: Optional[ModelEMA] = None,
+    mixup_alpha: float = 0.0,
+    mixup_prob: float = 0.5,
+    anchor_backbone_params: Optional[Dict[str, torch.Tensor]] = None,
+    l2_sp_weight: float = 0.0,
 ) -> Dict[str, float]:
     """One distillation epoch.
 
     feat_target: "fused" aligns phi(f_img) with Teacher f_mm; "vision" aligns it with the Teacher's
                  vision-branch embedding (details["features"]["vision"]).
     ema: if given, updated after every optimizer step.
+    mixup_alpha: if > 0, applies Feature-Space Mixup on 256-d F_rgb with probability `mixup_prob`.
+    anchor_backbone_params / l2_sp_weight: if provided and > 0, adds L2-SP penalty anchoring
+                 `student.vision_backbone` to its initial unimodal weights.
     """
     student.train()
     teacher.eval()
@@ -336,9 +405,32 @@ def train_one_epoch(
             else:
                 logits_t, feat_t = teacher(img, audio, sensor)
 
+        use_mixup = (mixup_alpha > 0.0) and (label.size(0) >= 2) and (np.random.rand() < mixup_prob)
         with ctx:
-            logits_s, _f_img_s, f_proj_s = student(img, return_features=True)
-            loss, parts = criterion(logits_s, logits_t, f_proj_s, feat_t, label)
+            if use_mixup:
+                f_img_s = student.vision_backbone(img)
+                lam = float(np.random.beta(mixup_alpha, mixup_alpha))
+                perm = torch.randperm(label.size(0), device=device)
+                f_mix = lam * f_img_s + (1.0 - lam) * f_img_s[perm]
+                logits_s = student.classifier(f_mix)
+                f_proj_s = student.projection_head(f_mix)
+                loss, parts = criterion.forward_mixup(
+                    logits_s,
+                    logits_t,
+                    logits_t[perm],
+                    f_proj_s,
+                    feat_t,
+                    feat_t[perm],
+                    label,
+                    label[perm],
+                    lam,
+                )
+            else:
+                logits_s, _f_img_s, f_proj_s = student(img, return_features=True)
+                loss, parts = criterion(logits_s, logits_t, f_proj_s, feat_t, label)
+
+            if l2_sp_weight > 0.0 and anchor_backbone_params is not None and not student.backbone_frozen:
+                loss = loss + l2_sp_weight * compute_l2_sp_loss(student.vision_backbone, anchor_backbone_params)
 
         scaler.scale(loss / accum_steps).backward()
         if (step + 1) % accum_steps == 0 or (step + 1) == n_batches:
@@ -558,13 +650,21 @@ def main() -> None:
     for sp in train_splits:
         ds_sp = mm_datasets[sp]
         idx = filter_rgb_indices(ds_sp)
-        train_labels += [ds_sp.samples[i]["label"] for i in idx]
-        subsets.append(Subset(ds_sp, idx))
+        if args.dedup_fruits:
+            dedup_ds = FruitDedupMultimodalDataset(ds_sp, idx, seed=args.seed)
+            train_labels += dedup_ds.labels
+            subsets.append(dedup_ds)
+        else:
+            train_labels += [ds_sp.samples[i]["label"] for i in idx]
+            subsets.append(Subset(ds_sp, idx))
     train_ds = subsets[0] if len(subsets) == 1 else ConcatDataset(subsets)
 
     # Val uses ImageDataset only (RGB-Only), matching Student's deployment conditions
     val_ds = build_vision_eval_dataset(args.manifest, args.data_dir, split="valid", image_size=args.image_size)
-    logger.info(f"[data] Train splits {train_splits} -> RGB samples: {len(train_ds)} | Val RGB samples: {len(val_ds)}")
+    logger.info(
+        f"[data] Train splits {train_splits} (dedup_fruits={args.dedup_fruits}) -> "
+        f"RGB samples: {len(train_ds)} | Val RGB samples: {len(val_ds)}"
+    )
     if "valid" in train_splits:
         logger.warning(
             "Val fruits are part of the training set: validation metrics are in-sample (monitoring only). "
@@ -602,6 +702,13 @@ def main() -> None:
     )
     student = VisionStudent(s_cfg, vision_ckpt=init_vision_ckpt)
     student.to(device)
+    anchor_backbone_params: Optional[Dict[str, torch.Tensor]] = None
+    if args.l2_sp_weight > 0.0:
+        anchor_backbone_params = {
+            name: p.detach().cpu().clone()
+            for name, p in student.vision_backbone.named_parameters()
+        }
+        logger.info(f"L2-SP anchor enabled (weight={args.l2_sp_weight}) on initial VisionBackbone weights.")
     if init_vision_ckpt is not None:
         logger.info(f"Initialized Student VisionBackbone from unimodal checkpoint: {init_vision_ckpt}")
     n_params = sum(p.numel() for p in student.parameters())
@@ -682,11 +789,16 @@ def main() -> None:
     prefix = "smoke_" if args.smoke else ""
 
     def run_epoch(epoch: int, phase: str, optimizer) -> Dict[str, float]:
+        is_p2 = (phase == "phase2")
         tr = train_one_epoch(
             student, teacher, train_loader, criterion, optimizer, scaler,
             device, amp_on, amp_dtype, args.accum_steps, args.grad_clip,
             args.max_batches, f"{phase} ep {epoch}",
             feat_target=args.feat_target, ema=ema,
+            mixup_alpha=(args.mixup_alpha if is_p2 else 0.0),
+            mixup_prob=args.mixup_prob,
+            anchor_backbone_params=anchor_backbone_params,
+            l2_sp_weight=(args.l2_sp_weight if is_p2 else 0.0),
         )
         va = validate_student(eval_model(), val_loader, device, amp_on, amp_dtype, args.max_batches, tta=use_tta)
         lrs = {f"lr_{g.get('name', i)}": g["lr"] for i, g in enumerate(optimizer.param_groups)}

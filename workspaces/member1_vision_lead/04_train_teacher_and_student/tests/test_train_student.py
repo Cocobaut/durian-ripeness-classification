@@ -786,3 +786,75 @@ def test_train_student_main_smoke_trainval_fixed_epochs(tmp_path, monkeypatch):
     assert ckpt["epoch"] == 2, "Fixed-epoch mode must keep the final epoch"
     cfg = json.loads((results_dir / "smoke_config.json").read_text(encoding="utf-8"))
     assert cfg["train_splits"] == "train,valid"
+
+
+# ------------------------------------------------------------------------------
+# 11. CMKD v4 mechanisms: fruit deduplication, Feature-Space Mixup, L2-SP anchor
+# ------------------------------------------------------------------------------
+def test_fruit_dedup_multimodal_dataset():
+    class MockMM:
+        def __init__(self):
+            self.samples = [
+                {"fruit_id": "durian_001", "label": 0, "audio": "android"},
+                {"fruit_id": "durian_001", "label": 0, "audio": "iphone"},
+                {"fruit_id": "durian_002", "label": 2, "audio": None},
+            ]
+
+        def __getitem__(self, i):
+            return self.samples[i]
+
+    ds = train_student.FruitDedupMultimodalDataset(MockMM(), [0, 1, 2], seed=42)
+    assert len(ds) == 2
+    assert ds.fruit_ids == ["durian_001", "durian_002"]
+    assert ds.labels == [0, 2]
+    seen_audios = {ds[0]["audio"] for _ in range(20)}
+    assert seen_audios == {"android", "iphone"}
+    assert ds[1]["audio"] is None
+
+
+def test_distillation_loss_mixup_and_l2_sp():
+    torch.manual_seed(0)
+    teacher, student = tiny_teacher(), tiny_student()
+    loader = DataLoader(FakeMultimodalDataset(n=6), batch_size=2, shuffle=False)
+    opt = torch.optim.AdamW(student.param_groups(1e-4, 1e-3))
+
+    anchor = {k: p.detach().cpu().clone() for k, p in student.vision_backbone.named_parameters()}
+    assert train_student.compute_l2_sp_loss(student.vision_backbone, anchor).item() == pytest.approx(0.0, abs=1e-7)
+
+    stats = train_student.train_one_epoch(
+        student, teacher, loader,
+        make_criterion(feat_loss_type="relational", kd_weighting="teacher_confidence"),
+        opt, torch.amp.GradScaler("cuda", enabled=False), torch.device("cpu"),
+        False, torch.float32, 1, 1.0, 0, "mixup_l2sp",
+        feat_target="fused", mixup_alpha=0.2, mixup_prob=1.0,
+        anchor_backbone_params=anchor, l2_sp_weight=1e-2,
+    )
+    assert all(torch.isfinite(torch.tensor(v)) for v in stats.values())
+    assert train_student.compute_l2_sp_loss(student.vision_backbone, anchor).item() > 0.0
+
+
+@needs_manifest
+def test_train_student_main_smoke_v4_recipe(tmp_path, monkeypatch):
+    monkeypatch.setattr(train_student, "TEACHER_CKPT_CANDIDATES", [])
+    teacher_ckpt = tmp_path / "best_teacher.pth"
+    torch.save(teacher_checkpoint_dict(tiny_teacher(), epoch=1, val_f1=0.5), teacher_ckpt)
+    results_dir = tmp_path / "results_student"
+    save_path = tmp_path / "ckpt" / "student_v4.pth"
+    monkeypatch.setattr(sys, "argv", [
+        "train_student.py", "--smoke", "--teacher-ckpt", str(teacher_ckpt),
+        "--student-backbone", "resnet18", "--proj-hidden-dim", "64", "--image-size", str(IMG),
+        "--batch-size", "2", "--accum-steps", "1", "--num-workers", "0", "--device", "cpu", "--no-amp", "--fresh",
+        "--train-splits", "train,valid", "--dedup-fruits",
+        "--loss-type", "ce", "--label-smoothing", "0.08",
+        "--alpha", "1.0", "--beta", "0.5", "--gamma", "0.25", "--temperature", "3.0",
+        "--feat-target", "fused", "--feat-loss-type", "relational", "--kd-weighting", "teacher_confidence",
+        "--mixup-alpha", "0.2", "--mixup-prob", "0.5", "--l2-sp-weight", "1e-3",
+        "--ema-decay", "0.985", "--select-metric", "last",
+        "--save-path", str(save_path), "--results-dir", str(results_dir), "--skip-final-eval",
+    ])
+    train_student.main()
+    cfg = json.loads((results_dir / "smoke_config.json").read_text(encoding="utf-8"))
+    assert cfg["dedup_fruits"] is True
+    assert cfg["mixup_alpha"] == 0.2
+    assert cfg["l2_sp_weight"] == 1e-3
+    assert cfg["feat_target"] == "fused" and cfg["feat_loss_type"] == "relational"
