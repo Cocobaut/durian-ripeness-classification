@@ -88,6 +88,12 @@ durian-ripeness-classification/
 │   ├── DINOv3_classification_head/             # DINOv3 ViT-B/16 single-view (outputs/) & multi-view (outputs_improve/)
 │   └── ResNet-50/                              # ResNet-50 single-view (outputs/) & multi-view (outputs_improve/)
 │
+├── ablation_study/                             # Single-View ConvNeXt V2 Teacher-Student CMKD ablation study
+│   ├── src/                                    # Standalone single-view Teacher (ConvNeXt V2-Base) & Student (ConvNeXt V2-Tiny) code
+│   └── outputs/
+│       ├── checkpoint/                         # Single-view teachermodal/ & studentmodal/ checkpoints
+│       └── result/                             # Single-view results_teacher/ & results_student/ benchmarks
+│
 ├── checkpoints/                                # Pretrained model weights (downloaded from Google Drive)
 │   ├── studentmodal/                           # best_student.pth, last_student.pth
 │   ├── teachermodal/                           # best_teacher.pth, last_teacher.pth
@@ -574,6 +580,13 @@ Before training the Multi-Modal Teacher, we systematically benchmarked three vis
 | **4. Multi-Modal Teacher (`Cross-Attention`)** | Multi-View RGB + Audio + Sensor | `80.85%` | `78.21%` | `79.31%` | `78.41%` |
 | **4b. Multi-Modal Teacher (same 24 RGB fruits as Student)** | Multi-View RGB + Audio + Sensor | — | — | `79.17%` | `79.08%` |
 | **5. Vision-Only Student (`ConvNeXt V2-Base` CMKD Multi-View)** | **Multi-View RGB Only** | **`54.17%`** | **`51.85%`** | **`54.17%`** | **`51.85%`** |
+
+#### Single-View CMKD Ablation (`ablation_study/`) vs. Multi-View CMKD (`src/` + `workspaces/`)
+
+| CMKD Pipeline | Vision Unimodal (Fruit Acc / F1) | Multi-Modal Teacher (Fruit Acc / F1) | Vision-Only Student (Fruit Acc / F1) |
+| :--- | :---: | :---: | :---: |
+| **Single-View CMKD (`ablation_study/`)**<br>*(Standard `ConvNeXt V2-Base` Teacher → `ConvNeXt V2-Tiny` Student)* | `45.83% / 43.51%` | `72.41% / 70.30%` | **`58.33% / 57.72%`** *(+12.50% / +14.21%)* |
+| **Multi-View CMKD (Main System)**<br>*(Multi-View Gated Attention `ConvNeXt V2-Base` Teacher → Student)* | **`58.33% / 55.59%`** | **`79.31% / 78.41%`** | `54.17% / 51.85%` *(Log-Loss: `1.207 → 1.084`)* |
 
 > **Key Findings & Physical Limitation Analysis:**
 > - **Multi-Modal Upper Bound Confirmed:** Upgrading to Multi-View RGB boosts the Multi-Modal Teacher from `72.41%` to **`79.31%` Fruit Accuracy** (`+20.84%` Acc / `+23.49%` Macro-F1 over Multi-View Vision Unimodal on the same 24 RGB fruits).
