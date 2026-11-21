@@ -3,17 +3,17 @@
   "data_dir": "data/final",
   "sensor_cache_dir": "/content/durian-ripeness-classification/workspaces/member3_sensor/02_train_unimodal_sensor/results",
   "sensor_preprocessor": "/content/durian-ripeness-classification/workspaces/member3_sensor/02_train_unimodal_sensor/results/sensor_preprocessor_unimodal.joblib",
-  "vision_ckpt": "/content/durian-ripeness-classification/checkpoints/unimodal/vision/best_vision_unimodal.pth",
+  "vision_ckpt": "/content/durian-ripeness-classification/checkpoints/unimodal/vision/convnextv2_multiview_backbone_256d.pth",
   "audio_ckpt": "/content/durian-ripeness-classification/checkpoints/unimodal/audio/audio_backbone_teacher.pth",
   "sensor_ckpt": "/content/durian-ripeness-classification/checkpoints/unimodal/sensor/best_sensor_unimodal.pth",
   "save_path": "/content/durian-ripeness-classification/checkpoints/teachermodal/best_teacher.pth",
   "results_dir": "/content/durian-ripeness-classification/workspaces/member1_vision_lead/04_train_teacher_and_student/results",
   "epochs": 30,
   "warmup_epochs": 5,
-  "batch_size": 8,
+  "batch_size": 4,
   "accum_steps": 2,
   "lr_head_warmup": 0.001,
-  "lr_backbone": 1e-05,
+  "lr_backbone": 1.5e-05,
   "lr_head": 0.0005,
   "min_lr": 1e-06,
   "weight_decay_head": 0.01,
@@ -32,14 +32,14 @@
   "num_attn_layers": 1,
   "proj_dim": 256,
   "latent_dim_mm": 256,
-  "select_metric": "sample_macro_f1",
+  "select_metric": "fruit_macro_f1",
   "device": "cuda",
   "num_workers": 2,
   "no_amp": false,
   "image_size": 384,
   "seed": 42,
   "resume": null,
-  "fresh": false,
+  "fresh": true,
   "eval_test": true,
   "eval_only": false,
   "skip_final_eval": false,
@@ -61,7 +61,10 @@
     "num_attn_layers": 1,
     "vision_model_name": "convnextv2_base.fcmae_ft_in1k",
     "vision_drop_path": 0.2,
-    "vision_dim": 1024,
+    "vision_dim": 256,
+    "vision_attn_hidden_dim": 128,
+    "vision_proj_dropout": 0.25,
+    "vision_attn_dropout": 0.1,
     "audio_dim": 512,
     "sensor_input_dim": 21,
     "sensor_hidden_dims": [
@@ -72,15 +75,17 @@
     "sensor_dropout": 0.3
   },
   "class_weights": [
-    1.4754902124404907,
-    0.8879055976867676,
-    0.8361111283302307
+    0.8072289228439331,
+    1.0307692289352417,
+    1.2641509771347046
   ],
   "data_stats": {
     "train": {
       "split": "train",
       "n_fruits": 132,
-      "n_samples": 1505,
+      "n_samples": 201,
+      "n_rgb_views": 1497,
+      "pad_views": 6,
       "fruits_without_rgb": 8,
       "fruits_without_audio": 40,
       "fruits_without_sensor": 0
@@ -88,7 +93,9 @@
     "valid": {
       "split": "valid",
       "n_fruits": 28,
-      "n_samples": 286,
+      "n_samples": 45,
+      "n_rgb_views": 282,
+      "pad_views": 18,
       "fruits_without_rgb": 4,
       "fruits_without_audio": 6,
       "fruits_without_sensor": 0
@@ -96,7 +103,9 @@
     "test": {
       "split": "test",
       "n_fruits": 29,
-      "n_samples": 303,
+      "n_samples": 47,
+      "n_rgb_views": 298,
+      "pad_views": 18,
       "fruits_without_rgb": 5,
       "fruits_without_audio": 9,
       "fruits_without_sensor": 0

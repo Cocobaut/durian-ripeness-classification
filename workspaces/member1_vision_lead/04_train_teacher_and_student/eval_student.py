@@ -22,7 +22,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, List, Optional, Sequence, Union
 
 THIS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = THIS_DIR.parents[2]
@@ -47,8 +47,45 @@ from eval_teacher import TeacherEvaluator, TeacherEvaluatorConfig  # noqa: E402
 logger = logging.getLogger("eval_student")
 
 
+class StudentEnsemble(torch.nn.Module):
+    """Average the softmax probabilities of several Students (e.g. different seeds).
+
+    Returns log(mean probs) so downstream code that applies softmax recovers the averaged probabilities.
+    """
+
+    def __init__(self, members: List[VisionStudent]) -> None:
+        super().__init__()
+        self.members = torch.nn.ModuleList(members)
+
+    @property
+    def tta_enabled(self) -> bool:
+        return all(m.tta_enabled for m in self.members)
+
+    @tta_enabled.setter
+    def tta_enabled(self, value: bool) -> None:
+        for m in self.members:
+            m.tta_enabled = bool(value)
+
+    def forward(self, img: torch.Tensor, *args, **kwargs) -> torch.Tensor:
+        probs = torch.stack([torch.softmax(m(img, *args, **kwargs).float(), dim=-1) for m in self.members])
+        return torch.log(probs.mean(dim=0).clamp_min(1e-12))
+
+
+def load_students(
+    ckpt_paths: Union[str, Path, Sequence[Union[str, Path]]],
+    device: torch.device,
+) -> torch.nn.Module:
+    """One checkpoint -> VisionStudent; several -> StudentEnsemble."""
+    paths = [ckpt_paths] if isinstance(ckpt_paths, (str, Path)) else list(ckpt_paths)
+    models = [build_student_from_checkpoint(resolve_path(p), device=device, eval_mode=True) for p in paths]
+    if len(models) == 1:
+        return models[0]
+    logger.info(f"Ensembling {len(models)} Students: {[str(p) for p in paths]}")
+    return StudentEnsemble(models).to(device).eval()
+
+
 class _ManifestFallbackImageDataset(torch.utils.data.Dataset):
-    """Fallback dataset for smoke/test runs on local machines without downloaded RGB images."""
+    """Fallback multi-view dataset for smoke/test runs on local machines without downloaded RGB images."""
 
     def __init__(self, fruit_ids, labels, image_size: int = IMAGE_SIZE):
         self.fruit_ids = list(fruit_ids)
@@ -59,8 +96,8 @@ class _ManifestFallbackImageDataset(torch.utils.data.Dataset):
         return len(self.fruit_ids)
 
     def __getitem__(self, idx: int):
-        img = torch.zeros(3, self.image_size, self.image_size, dtype=torch.float32)
-        return img, self.labels[idx], self.fruit_ids[idx], {"camera_angle": "NONE"}
+        img = torch.zeros(1, 3, self.image_size, self.image_size, dtype=torch.float32)
+        return img, self.labels[idx], self.fruit_ids[idx], {"camera_angle": "MULTI_VIEW"}
 
 
 def build_vision_eval_dataset(
@@ -69,14 +106,21 @@ def build_vision_eval_dataset(
     split: str,
     image_size: int = IMAGE_SIZE,
 ):
-    """Build `ImageDataset` containing only samples with real RGB images for `valid` or `test`."""
+    """Build Multi-View `ImageDataset` grouping all views of each fruit for `valid` or `test`."""
     resolved_split = split_dir_name(split)
     manifest = pd.read_csv(resolve_path(manifest_path))
     fruits = manifest[manifest["Split"] == resolved_split].sort_values("fruit_id")
     label_map = dict(zip(fruits["fruit_id"], fruits["label_idx"].astype(int)))
     rgb_dir = resolve_path(data_dir) / resolved_split / "rgb"
     records = list_rgb_images(rgb_dir)
-    ds = ImageDataset(records, label_map, transform=get_eval_transforms(image_size))
+    ds = ImageDataset(
+        records,
+        label_map,
+        transform=get_eval_transforms(image_size),
+        multiview=True,
+        is_train=False,
+        image_size=image_size,
+    )
     if len(ds) == 0:
         logger.warning(f"No RGB images found at {rgb_dir}; using fallback from manifest ({len(fruits)} fruits).")
         return _ManifestFallbackImageDataset(fruits["fruit_id"], fruits["label_idx"], image_size=image_size)
@@ -84,21 +128,27 @@ def build_vision_eval_dataset(
 
 
 def evaluate_student_split(
-    ckpt_path: Union[str, Path],
+    ckpt_path: Union[str, Path, Sequence[Union[str, Path]]],
     manifest_path: Union[str, Path],
     data_dir: Union[str, Path],
     split: str,
     output_dir: Union[str, Path],
-    batch_size: int = 16,
+    batch_size: int = 4,
     num_workers: int = 0,
     image_size: int = IMAGE_SIZE,
     device: Union[str, torch.device] = "cpu",
     smoke: bool = False,
     seed: int = 42,
-    model: Optional[VisionStudent] = None,
+    model: Optional[torch.nn.Module] = None,
+    tta: bool = True,
 ) -> Dict:
-    """Evaluate VisionStudent on `valid` or `test` split using RGB images only."""
-    ckpt_path = resolve_path(ckpt_path)
+    """Evaluate Multi-View VisionStudent on `valid` or `test` split using RGB image bags only.
+
+    `tta=True` applies the same per-view 3-crop/flip TTA as the unimodal Vision baseline evaluation
+    (0.5 * original + 0.3 * hflip + 0.2 * 95% zoom), so Student and baseline are compared fairly.
+    """
+    ckpt_list = [ckpt_path] if isinstance(ckpt_path, (str, Path)) else list(ckpt_path)
+    ckpt_path = resolve_path(ckpt_list[0])
     output_dir = resolve_path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     device_obj = torch.device(device)
@@ -116,9 +166,11 @@ def evaluate_student_split(
         worker_init_fn=worker_init_fn,
     )
     if model is None:
-        model = build_student_from_checkpoint(ckpt_path, device=device_obj, eval_mode=True)
+        model = load_students(ckpt_list, device_obj)
     else:
         model.to(device_obj).eval()
+    model.tta_enabled = bool(tta)
+    logger.info(f"Student evaluation on '{split}' | TTA: {bool(tta)}")
 
     resolved_split = split_dir_name(split)
     split_prefix = ("smoke_" if smoke else "") + ("val" if resolved_split != "test" else "test")
@@ -146,9 +198,21 @@ def generate_benchmark_comparison(
     student_results_dir = resolve_path(student_results_dir)
     rows = []
 
-    # 1. Vision Unimodal Baseline
-    v_csv = project_root / "workspaces" / "member1_vision_lead" / "02_train_unimodal_vision" / "results" / "test_predictions_detailed.csv"
-    if v_csv.is_file():
+    # 1. Vision Unimodal Baseline (prefers Multi-View ConvNeXtV2-Base Gated Attention summary if present)
+    v_dir = project_root / "workspaces" / "member1_vision_lead" / "02_train_unimodal_vision" / "results"
+    v_mv_json = v_dir / "test_metrics_summary_multiview.json"
+    v_csv = v_dir / "test_predictions_detailed.csv"
+    if v_mv_json.is_file():
+        v_data = json.loads(v_mv_json.read_text(encoding="utf-8"))
+        rows.append({
+            "Model": "1. Vision Unimodal (ConvNeXtV2-Base Multi-View)",
+            "Test Input": "Multi-View RGB",
+            "Sample Acc": v_data.get("image_level_accuracy"),
+            "Sample Macro-F1": v_data.get("image_level_macro_f1"),
+            "Fruit Acc": v_data.get("fruit_level_accuracy"),
+            "Fruit Macro-F1": v_data.get("fruit_level_macro_f1"),
+        })
+    elif v_csv.is_file():
         v_df = pd.read_csv(v_csv)
         v_s_acc = float(v_df["is_correct"].mean())
         v_s_f1 = float(f1_score(v_df["true_label"], v_df["pred_label"], average="macro"))
@@ -198,24 +262,45 @@ def generate_benchmark_comparison(
 
     # 4. Multi-Modal Teacher
     t_json = project_root / "workspaces" / "member1_vision_lead" / "04_train_teacher_and_student" / "results" / "test_metrics.json"
+    if not t_json.is_file():
+        t_json = project_root / "workspaces" / "member1_vision_lead" / "04_train_teacher_and_student" / "results_teacher" / "test_metrics.json"
     if t_json.is_file():
         t_m = json.loads(t_json.read_text(encoding="utf-8")).get("metrics", {})
         rows.append({
             "Model": "4. Multi-Modal Teacher (Cross-Attention)",
-            "Test Input": "RGB + Audio + Sensor",
+            "Test Input": "Multi-View RGB + Audio + Sensor",
             "Sample Acc": t_m.get("sample_accuracy"),
             "Sample Macro-F1": t_m.get("sample_macro_f1"),
             "Fruit Acc": t_m.get("fruit_accuracy"),
             "Fruit Macro-F1": t_m.get("fruit_macro_f1"),
         })
 
+        # 4b. Teacher restricted to the fruits the Student is evaluated on (fruits with RGB images),
+        #     so Teacher vs Student is compared on the same fruit set.
+        t_fruit_csv = t_json.parent / "test_fruit_predictions.csv"
+        s_fruit_csv = student_results_dir / "test_fruit_predictions.csv"
+        if t_fruit_csv.is_file() and s_fruit_csv.is_file():
+            t_fr = pd.read_csv(t_fruit_csv)
+            s_ids = set(pd.read_csv(s_fruit_csv)["fruit_id"])
+            t_common = t_fr[t_fr["fruit_id"].isin(list(s_ids))]
+            if len(t_common) > 0 and len(t_common) < len(t_fr):
+                rows.append({
+                    "Model": f"4b. Multi-Modal Teacher (same {len(t_common)} RGB fruits as Student)",
+                    "Test Input": "Multi-View RGB + Audio + Sensor",
+                    "Sample Acc": None,
+                    "Sample Macro-F1": None,
+                    "Fruit Acc": float(accuracy_score(t_common["y_true"], t_common["y_pred"])),
+                    "Fruit Macro-F1": float(f1_score(t_common["y_true"], t_common["y_pred"], average="macro",
+                                                     labels=[0, 1, 2], zero_division=0)),
+                })
+
     # 5. Vision-Only Student (CMKD)
     st_json = student_results_dir / "test_metrics.json"
     if st_json.is_file():
         st_m = json.loads(st_json.read_text(encoding="utf-8")).get("metrics", {})
         rows.append({
-            "Model": "5. Vision-Only Student (CMKD Distilled)",
-            "Test Input": "RGB Only",
+            "Model": "5. Vision-Only Student (CMKD Multi-View)",
+            "Test Input": "Multi-View RGB Only",
             "Sample Acc": st_m.get("sample_accuracy"),
             "Sample Macro-F1": st_m.get("sample_macro_f1"),
             "Fruit Acc": st_m.get("fruit_accuracy"),
@@ -247,18 +332,20 @@ def generate_benchmark_comparison(
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Independent evaluation of Vision-Only Student model (Stage 2)")
-    p.add_argument("--checkpoint", default="checkpoints/studentmodal/best_student.pth")
+    p = argparse.ArgumentParser(description="Independent evaluation of Multi-View Vision-Only Student model (Stage 2)")
+    p.add_argument("--checkpoint", nargs="+", default=["checkpoints/studentmodal/best_student.pth"],
+                   help="One Student checkpoint, or several to evaluate their probability-averaged ensemble")
     p.add_argument("--manifest", default="data/final/final_multimodal_manifest.csv")
     p.add_argument("--data-dir", default="data/final")
     p.add_argument("--split", default="test", choices=["val", "valid", "test"])
     p.add_argument("--output-dir", default="workspaces/member1_vision_lead/04_train_teacher_and_student/results_student")
-    p.add_argument("--batch-size", type=int, default=16)
+    p.add_argument("--batch-size", type=int, default=4)
     p.add_argument("--num-workers", type=int, default=0)
     p.add_argument("--image-size", type=int, default=IMAGE_SIZE)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--no-tta", action="store_true", help="Disable 3-view TTA (orig + hflip + 95%% zoom)")
     return p.parse_args()
 
 
@@ -276,6 +363,7 @@ def main() -> None:
         device=args.device,
         smoke=args.smoke,
         seed=args.seed,
+        tta=not args.no_tta,
     )
     m = res["metrics"]
     print(

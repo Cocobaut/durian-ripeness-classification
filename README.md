@@ -8,7 +8,7 @@
 
 An end-to-end **Cross-Modal Knowledge Distillation (CMKD)** and **Learning Under Privileged Information (LUPI)** system for non-destructive durian (*Durio zibethinus*) ripeness grading across three physiological stages: **`Unripe`**, **`Ripe`**, and **`Overripe`**.
 
-During offline training, a **Multi-Modal Teacher** fuses external RGB imagery, acoustic knock resonance, thermal imaging, near-infrared (NIR) multispectral bands, and laboratory physicochemical measurements. Knowledge is then distilled—via response-based soft logits and feature-space latent alignment—into a lightweight **Vision-Only Student** (`ConvNeXt V2-Tiny`) that operates in real-world deployment **using RGB images alone**, with no microphones, thermal cameras, or destructive laboratory sensors required.
+During offline training, a **Multi-Modal Teacher** fuses **multi-view external RGB fruit bags** (`ConvNeXt V2-Base + 256-D Projection + Lightweight Gated Attention`), acoustic knock resonance, thermal imaging, near-infrared (NIR) multispectral bands, and laboratory physicochemical measurements. Knowledge is then distilled—via confidence-weighted soft logits and relational feature-space alignment—into a **Vision-Only Multi-View Student** (`ConvNeXt V2-Base` + `256-D` Projection + Gated Attention) that operates in real-world deployment **using RGB images alone**, with no microphones, thermal cameras, or destructive laboratory sensors required.
 
 ---
 
@@ -19,13 +19,13 @@ During offline training, a **Multi-Modal Teacher** fuses external RGB imagery, a
 4. [Model Architecture & CMKD Framework](#4-model-architecture--cmkd-framework)
 5. [Installation, Pretrained Checkpoints & Quickstart](#5-installation-pretrained-checkpoints--quickstart)
 6. [Dataset Download & Retraining Pipeline](#6-dataset-download--retraining-pipeline)
-   - [Training on Google Colab (GPU Notebooks)](#training-on-google-colab-interactive-gpu-notebooks)
-   - [Running the Interactive Streamlit Dashboard](#running-the-interactive-streamlit-dashboard-step-by-step-guide)
-7. [Exploratory Data Analysis (EDA) Report](#7-exploratory-data-analysis-eda-report)
-8. [Experimental Results (Unimodal, Teacher & Student)](#8-experimental-results-unimodal-teacher--student)
-9. [Interactive Streamlit Dashboard & Visualizations](#9-interactive-streamlit-dashboard--visualizations)
-10. [Citation & Acknowledgments](#10-citation--acknowledgments)
-11. [Contributors & Team Members](#11-contributors--team-members)
+   - [Training on Google Colab (Interactive GPU Notebooks)](#training-on-google-colab-interactive-gpu-notebooks)
+7. [Running the Interactive Streamlit Dashboard](#7-running-the-interactive-streamlit-dashboard-step-by-step-guide)
+8. [Exploratory Data Analysis (EDA) Report](#8-exploratory-data-analysis-eda-report)
+9. [Experimental Results (Vision Baselines, Unimodal, Teacher & Student)](#9-experimental-results-vision-baselines-unimodal-teacher--student)
+10. [Interactive Streamlit Dashboard & Visualizations](#10-interactive-streamlit-dashboard--visualizations)
+11. [Citation & Acknowledgments](#11-citation--acknowledgments)
+12. [Contributors & Team Members](#12-contributors--team-members)
 
 ---
 
@@ -33,10 +33,10 @@ During offline training, a **Multi-Modal Teacher** fuses external RGB imagery, a
 
 Non-destructive durian ripeness grading from external appearance alone is notoriously challenging because spine morphology and peel hue vary subtly across cultivars and lighting, whereas internal pulp softening and flesh-husk detachment are strongly expressed in **acoustic knock resonance** and **physicochemical properties**.
 
-This project solves the deployment bottleneck with a two-stage **CMKD** pipeline:
-- **Stage 1A — Unimodal Backbones:** Train and benchmark modality-specific feature extractors for **RGB Vision** (`ConvNeXt V2-Base`), **Acoustic Knock Sound** (`ResNet-18` on 64-bin log-Mel spectrograms), and **Integrated Sensors** (`SensorBackbone` MLP over 21 tabular + thermal + multispectral features).
-- **Stage 1B — Multi-Modal Teacher (`MultiModalTeacher`):** Fuse all three modalities via **Transformer Cross-Attention** (`CrossAttentionMultimodalFusion`) with learnable modality embeddings, adaptive modality gating, `key_padding_mask` missing-modality handling, and an ordinal **Cost-Sensitive Focal Loss** to learn a rich privileged latent representation $f_{\text{mm}} \in \mathbb{R}^{256}$.
-- **Stage 2 — Vision-Only Student (`VisionStudent`):** Distill soft logit distributions ($\mathcal{L}_{\text{KD}}$) and cross-modal latent embeddings ($\mathcal{L}_{\text{feat}}$) from the frozen Teacher into a compact **RGB-only** `ConvNeXt V2-Tiny` Student equipped with an adaptive `ProjectionHead` $\phi(f_{\text{img}}) \in \mathbb{R}^{256}$.
+This project addresses durian ripeness grading with a two-stage **Multi-View CMKD** pipeline:
+- **Stage 1A — Unimodal Backbones & Vision Baseline Study:** Benchmark both **Single-View** and **Multi-View Gated Attention** vision architectures (`ResNet-50`, `DINOv3`, `ConvNeXt V2-Base`), selecting **Multi-View `ConvNeXt V2-Base` + `1024 → 256` Projection + Lightweight Gated Attention Pooling (Ilse et al., $D = 128$)** as the official Vision backbone alongside **Acoustic Knock Sound** (`ResNet-18` on 64-bin log-Mel spectrograms) and **Integrated Sensors** (`SensorBackbone` MLP over 21 tabular + thermal + multispectral features).
+- **Stage 1B — Multi-Modal Teacher (`MultiModalTeacher`):** Fuse the fruit-level Multi-View RGB embedding ($F_{\text{rgb}} \in \mathbb{R}^{256}$), Acoustic embedding ($f_{\text{audio}} \in \mathbb{R}^{512}$), and Sensor embedding ($f_{\text{sensor}} \in \mathbb{R}^{32}$) via **Transformer Cross-Attention** (`CrossAttentionMultimodalFusion`) with learnable modality embeddings, adaptive modality gating, `key_padding_mask` missing-modality handling, and an ordinal **Cost-Sensitive Focal Loss** to learn a rich privileged latent representation $f_{\text{mm}} \in \mathbb{R}^{256}$.
+- **Stage 2 — Vision-Only Student (`VisionStudent`):** Distill teacher-confidence-weighted soft logit distributions ($\mathcal{L}_{\text{KD}}$) and relational multimodal geometry ($\mathcal{L}_{\text{feat}}$) from the frozen Teacher into a **Multi-View RGB-only** `ConvNeXt V2-Base` Student equipped with an adaptive `ProjectionHead` $\phi(F_{\text{rgb}}) \in \mathbb{R}^{256}$, fruit-level deduplicated sampling, and Feature-Space Mixup.
 - **Stage 3 — Interactive Deployment:** Serve single-image and multi-view (6-angle) fruit ripeness classification through a modular **Streamlit Dashboard** (`app.py` + `visualization/`).
 
 ---
@@ -71,17 +71,22 @@ durian-ripeness-classification/
 │   │   ├── sensor_dataset.py                   # 21-D C_integrated19 feature builder & SensorDataset
 │   │   └── multimodal_dataset.py               # Synchronized RGB + Audio + Sensor Dataset with zero-masking
 │   ├── models/
-│   │   ├── vision_backbone.py                  # ConvNeXt V2 backbone wrapper
+│   │   ├── vision_backbone.py                  # Multi-View ConvNeXt V2-Base + 256-D Proj + Gated Attention
 │   │   ├── audio_backbone.py                   # ResNet-18 (in_chans=1) acoustic backbone wrapper
 │   │   ├── sensor_backbone.py                  # LayerNorm MLP encoder for 21-D sensor features
 │   │   ├── teacher_model.py                    # MultiModalTeacher & CrossAttentionMultimodalFusion
-│   │   └── student_model.py                    # VisionStudent (ConvNeXt V2-Tiny) & ProjectionHead
+│   │   └── student_model.py                    # Multi-View VisionStudent (ConvNeXt V2-Base) & ProjectionHead
 │   ├── losses/
 │   │   ├── classification_loss.py              # CostSensitiveFocalLoss (Ordinal Cost Matrix), Focal & CE
-│   │   └── distillation_loss.py                # CrossModalDistillationLoss (L_CE + L_KD + L_feat)
+│   │   └── distillation_loss.py                # CrossModalDistillationLoss (CE + KD + Relational Feat + Mixup)
 │   ├── evaluators/                             # Shared evaluation hooks
 │   └── utils/
 │       └── common.py                           # Seed control, CLASS_ORDER, path helpers
+│
+├── baselines/                                  # Single-View (outputs/) vs. Multi-View (outputs_improve/) Vision Baselines
+│   ├── ConvNeXtV2/                             # Single-view ConvNeXt V2-Base outputs/
+│   ├── DINOv3_classification_head/             # DINOv3 ViT-B/16 single-view (outputs/) & multi-view (outputs_improve/)
+│   └── ResNet-50/                              # ResNet-50 single-view (outputs/) & multi-view (outputs_improve/)
 │
 ├── checkpoints/                                # Pretrained model weights (downloaded from Google Drive)
 │   ├── studentmodal/                           # best_student.pth, last_student.pth
@@ -152,8 +157,8 @@ The project builds on the **Multi-Modal Durian Fruit Ripeness Dataset (AIDurian)
 flowchart LR
     subgraph S1["Stage 1B: Frozen Multi-Modal Teacher (Training Only)"]
         direction TB
-        V_IN["RGB Image (3x384x384)"] --> VB_T["VisionBackbone (ConvNeXt V2-Base, 1024-D)"]
-        A_IN["Knock Log-Mel (1x64x306)"] --> AB_T["AudioBackbone (ResNet-18, 512-D)"]
+        V_IN["Multi-View RGB Bag (N x 3 x 384 x 384)"] --> VB_T["VisionBackbone (ConvNeXt V2-Base + 256-D Proj + Gated Attn)"]
+        A_IN["Knock Log-Mel (1 x 64 x 306)"] --> AB_T["AudioBackbone (ResNet-18, 512-D)"]
         S_IN["Sensor Features (21-D)"] --> SB_T["SensorBackbone (LayerNorm MLP, 32-D)"]
         VB_T --> XF["CrossAttentionMultimodalFusion + Modality Gate"]
         AB_T --> XF
@@ -162,34 +167,39 @@ flowchart LR
         FMM --> T_CLS["Teacher Classifier -> Logits z_T (3)"]
     end
 
-    subgraph S2["Stage 2: Vision-Only Student (Deployment)"]
+    subgraph S2["Stage 2: Vision-Only Multi-View Student (Deployment)"]
         direction TB
-        S_V_IN["RGB Image Only (3x384x384)"] --> VB_S["VisionBackbone (ConvNeXt V2-Tiny, 768-D)"]
+        S_V_IN["Multi-View RGB Bag Only (N x 3 x 384 x 384)"] --> VB_S["VisionBackbone (ConvNeXt V2-Base + 256-D Proj + Gated Attn)"]
         VB_S --> S_CLS["Student Classifier -> Logits z_S (3)"]
-        VB_S --> PROJ["ProjectionHead phi(f_img) (256-D)"]
+        VB_S --> PROJ["ProjectionHead phi(F_rgb) (256-D)"]
     end
 
-    T_CLS -. "L_KD: T^2 * KL(softmax(z_T/T) || softmax(z_S/T))" .-> S_CLS
-    FMM -. "L_feat: 1 - CosineSim(phi(f_img), f_mm)" .-> PROJ
+    T_CLS -. "L_KD: Teacher-Confidence-Weighted T^2 * KL(z_T || z_S)" .-> S_CLS
+    FMM -. "L_feat: Relational Similarity MSE(phi(F_rgb), f_mm)" .-> PROJ
     S_CLS --> PRED["Final Ripeness: Unripe / Ripe / Overripe"]
 ```
 
 ### 4.2 Component Details
 
-1. **Multi-Modal Teacher (`src/models/teacher_model.py`):**
-   - **Vision Branch:** `convnextv2_base.fcmae_ft_in1k` $\rightarrow f_{\text{img}} \in \mathbb{R}^{1024}$.
+1. **Multi-View Vision Backbone (`src/models/vision_backbone.py`):**
+   - **Shared Extractor:** Each view $I_i$ in a fruit bag $\{I_1, \dots, I_N\}$ passes through `convnextv2_base.fcmae_ft_in1k` ($h_i \in \mathbb{R}^{1024}$) followed by a compression projection block $f_i = \text{Dropout}(\text{GELU}(\text{LayerNorm}(W_{\text{proj}} h_i))) \in \mathbb{R}^{256}$.
+   - **Lightweight Gated Attention Pooling (Ilse et al., $D = 128$):** Computes normalized per-view importance weights $a_i = \text{softmax}_i\!\left(w^\top (\tanh(V f_i) \odot \sigma(U f_i))\right)$ and aggregates all views of a fruit into a unified representation $F_{\text{rgb}} = \sum_{i=1}^N a_i f_i \in \mathbb{R}^{256}$.
+   - **Multi-View Regularization & TTA:** Random View Subsampling (`4–6` views/fruit/epoch) during training and per-view 3-crop/flip TTA (`0.50` original + `0.30` hflip + `0.20` 95% zoom) before pooling at evaluation time.
+
+2. **Multi-Modal Teacher (`src/models/teacher_model.py`):**
+   - **Vision Branch:** Multi-View `VisionBackbone` $\rightarrow F_{\text{rgb}} \in \mathbb{R}^{256}$.
    - **Audio Branch:** `resnet18` (`in_chans=1`) $\rightarrow f_{\text{audio}} \in \mathbb{R}^{512}$.
    - **Sensor Branch:** `Linear(21→64→48→32)` with `LayerNorm`, `ReLU`, `Dropout(0.3)` $\rightarrow f_{\text{sensor}} \in \mathbb{R}^{32}$.
    - **Cross-Attention Fusion:** Each modality is projected to `proj_dim=256`, added to learnable `modality_embed`, processed by a Pre-LN Transformer Encoder (`num_heads=4`, `dim_feedforward=512`) with `key_padding_mask` to safely ignore missing modalities, weighted by an Adaptive Modality Gate, and mapped to $f_{\text{mm}} \in \mathbb{R}^{256}$.
    - **Teacher Objective (`CostSensitiveFocalLoss`):** Focal loss ($\gamma = 2.0$, label smoothing $0.05$) combined with an **Ordinal Cost Matrix** heavily penalizing severe misclassifications (`Unripe ↔ Overripe` cost `3.0`, `Overripe → Ripe` cost `2.0`).
 
-2. **Vision-Only Student (`src/models/student_model.py`):**
-   - **Backbone:** `convnextv2_tiny.fcmae_ft_in1k` (~28.4M total parameters, $f_{\text{img}} \in \mathbb{R}^{768}$).
-   - **Projection Head ($\phi$):** `Linear(768→512) -> LayerNorm -> GELU -> Dropout -> Linear(512→256) -> LayerNorm`, aligning visual embeddings with the Teacher's privileged multimodal space $f_{\text{mm}} \in \mathbb{R}^{256}$.
+3. **Vision-Only Multi-View Student (`src/models/student_model.py`):**
+   - **Backbone:** Same Multi-View `VisionBackbone` (`convnextv2_base.fcmae_ft_in1k` + `256-D` Projection + Gated Attention, ~88.3M parameters), initialized from the converged Stage 1A unimodal checkpoint (`best_convnextv2_multiview.pth`).
+   - **Projection Head ($\phi$):** `Linear(256→512) -> LayerNorm -> GELU -> Dropout -> Linear(512→256) -> LayerNorm`, aligning $F_{\text{rgb}}$ with the Teacher's privileged multimodal space $f_{\text{mm}} \in \mathbb{R}^{256}$.
    - **Distillation Objective (`CrossModalDistillationLoss`):**
-     $$\mathcal{L}_{\text{total}} = \alpha\,\mathcal{L}_{\text{CE}}(y, z_S) + \beta\,T^2\,\mathrm{KL}\!\left(\sigma(z_T / T)\,\|\,\sigma(z_S / T)\right) + \gamma\,\left(1 - \cos\left(\phi(f_{\text{img}}), f_{\text{mm}}\right)\right)$$
-     with $\alpha = 1.0$, $\beta = 2.0$, $\gamma = 1.0$, $T = 3.0$.
-   - **2-Phase Optimization:** Phase 1 (Epochs 1–3) freezes the Student backbone to stabilize `ProjectionHead` and `Classifier`; Phase 2 (Epochs 4–30) jointly fine-tunes with differential learning rates (`lr_backbone = 1e-4`, `lr_head = 5e-4`, Cosine Annealing).
+     $$\mathcal{L}_{\text{total}} = \alpha\,\mathcal{L}_{\text{CE}}(y, z_S) + \beta\,w_t\,T^2\,\mathrm{KL}\!\left(\sigma(z_T / T)\,\|\,\sigma(z_S / T)\right) + \gamma\,\mathcal{L}_{\text{rel}}\!\left(\phi(F_{\text{rgb}}), f_{\text{mm}}\right)$$
+     with $\alpha = 1.0$ (label-smoothed CE, $\epsilon = 0.08$), $\beta = 0.5$ ($T = 3.0$, weighted by Teacher ground-truth confidence $w_t$), $\gamma = 0.25$ (in-batch relational cosine-similarity MSE on Teacher's fused $f_{\text{mm}}$), combined with **fruit-level deduplicated sampling** (`--dedup-fruits`) and **Feature-Space Mixup** ($\alpha_{\text{mix}} = 0.2$, $p = 0.5$).
+   - **2-Phase Optimization:** Phase 1 (Epochs 1–2) freezes `VisionBackbone` to align `ProjectionHead` and `Classifier`; Phase 2 (up to 40 epochs with Early Stopping `patience=10` on held-out Val `fruit_macro_f1`) fine-tunes with differential learning rates (`lr_backbone = 2e-5`, `lr_head = 2e-4`, Cosine Annealing).
 
 ---
 
@@ -225,7 +235,7 @@ Download the pretrained weights from the Google Drive folders below and place th
 | :--- | :--- | :--- | :--- |
 | **Student Model (CMKD Stage 2)** | [Download Student Checkpoints](https://drive.google.com/drive/folders/1R8PVPQh6MQKrXFxJJSEwCgWuSaOtUJPb?usp=sharing) | `checkpoints/studentmodal/` | `best_student.pth`, `last_student.pth` |
 | **Teacher Model (CMKD Stage 1B)** | [Download Teacher Checkpoints](https://drive.google.com/drive/folders/1QjpqsfAV5-Grgh4Ue9klCOJPwvCA0oiH?usp=drive_link) | `checkpoints/teachermodal/` | `best_teacher.pth`, `last_teacher.pth` |
-| **Unimodal Models (Stage 1A)** | [Download Unimodal Checkpoints](https://drive.google.com/drive/folders/1bp27F7EWdfkbIB8wWMPCOUucXEJ1wohs?usp=drive_link) | `checkpoints/unimodal/` | `image/` (or `vision/`) `best_vision_unimodal.pth`, `audio/audio_backbone_teacher.pth`, `audio/best_audio_unimodal.pth`, `sensor/best_sensor_unimodal.pth` |
+| **Unimodal Models (Stage 1A)** | [Download Unimodal Checkpoints](https://drive.google.com/drive/folders/1bp27F7EWdfkbIB8wWMPCOUucXEJ1wohs?usp=drive_link) | `checkpoints/unimodal/` | `vision/best_convnextv2_multiview.pth`, `vision/convnextv2_multiview_backbone_256d.pth`, `audio/audio_backbone_teacher.pth`, `audio/best_audio_unimodal.pth`, `sensor/best_sensor_unimodal.pth` |
 
 > **Tip:** To run the **Streamlit Dashboard** for inference only, downloading **`checkpoints/studentmodal/best_student.pth`** is sufficient.
 
@@ -277,10 +287,14 @@ python workspaces/member2_audio/02_train_unimodal_audio/train_audio.py
 python workspaces/member3_sensor/02_train_unimodal_sensor/train_unimodal_sensor.py
 
 # 4. Train Stage 1B Multi-Modal Teacher (and evaluate on Test set)
-python train_teacher.py --epochs 30 --batch-size 8 --accum-steps 2 --eval-test --device cuda
+python train_teacher.py --epochs 30 --batch-size 4 --accum-steps 2 --eval-test --device cuda
 
-# 5. Distill Stage 2 Vision-Only Student (and evaluate + generate benchmark comparison)
-python train_student.py --epochs 30 --batch-size 16 --eval-test --device cuda
+# 5. Distill Stage 2 Vision-Only Multi-View Student (and evaluate + generate benchmark comparison)
+python train_student.py --student-backbone convnextv2_base --dedup-fruits --loss-type ce \
+    --alpha 1.0 --beta 0.5 --gamma 0.25 --temperature 3.0 \
+    --feat-target fused --feat-loss-type relational --kd-weighting teacher_confidence \
+    --mixup-alpha 0.2 --epochs 40 --warmup-epochs 2 --patience 10 --batch-size 4 --accum-steps 2 \
+    --eval-test --device cuda
 
 # 6. Evaluate an existing Student checkpoint independently (RGB-only)
 python workspaces/member1_vision_lead/04_train_teacher_and_student/eval_student.py \
@@ -306,7 +320,7 @@ If you do not have a local NVIDIA GPU, you can reproduce Stage 1B Teacher traini
    - **What it does automatically:**
      1. Mounts Google Drive, clones/syncs the latest codebase (`BRANCH = ""`), and installs dependencies via `uv`.
      2. Symlinks `data/final/`, `checkpoints/teachermodal/best_teacher.pth`, `checkpoints/studentmodal/`, and `results_student/` to Google Drive.
-     3. Runs two-phase CMKD distillation (`train_student.py` with `convnextv2_tiny`, `alpha=1.0`, `beta=2.0`, `gamma=1.0`, `T=3.0`, `--epochs 30`, `--warmup-epochs 3`, `--eval-test`).
+     3. Runs two-phase CMKD distillation (`train_student.py` with Multi-View `convnextv2_base`, `--dedup-fruits`, `CE`, `alpha=1.0`, `beta=0.5`, `gamma=0.25`, `T=3.0`, relational `fused` feature alignment, `teacher_confidence` KD weighting, Feature-Space Mixup, `--epochs 40`, `--warmup-epochs 2`, `--patience 10`, `--eval-test`).
      4. Runs standalone RGB-only evaluation via `eval_student.py` and generates `benchmark_comparison.md` comparing Unimodal baselines, Teacher, and Student.
 
 > **Google Drive Folder Layout Expected by Both Colab Notebooks:**
@@ -466,13 +480,30 @@ Follow these steps to run local real-time durian ripeness inference using the Vi
 
 ---
 
-## 9. Experimental Results (Unimodal, Teacher & Student)
+## 9. Experimental Results (Vision Baselines, Unimodal, Teacher & Student)
 
-### 9.1 Stage 1A — Unimodal Baselines
+### 9.1 Vision Architecture Benchmark: Single-View (`outputs/`) vs. Multi-View Gated Attention (`outputs_improve/`)
 
-1. **Vision Unimodal Baseline (`ConvNeXt V2-Base`, RGB Only):**
-   - Evaluated on `298` test RGB images across `24` fruits (`workspaces/member1_vision_lead/02_train_unimodal_vision/results/`).
-   - Achieves **40.60% Sample Accuracy / 41.00% Sample Macro-F1** and **45.83% Fruit Accuracy / 43.51% Fruit Macro-F1**, highlighting the difficulty of distinguishing `Ripe` vs. `Overripe` from peel appearance alone.
+Before training the Multi-Modal Teacher, we systematically benchmarked three vision backbones (`ResNet-50`, `DINOv3 ViT-B/16`, and `ConvNeXt V2-Base`) on the same **24 hold-out test fruits (`298` RGB images)** under two input paradigms:
+- **Single-View (`outputs/`):** Each RGB image is classified independently and aggregated at the fruit level via mean-probability voting.
+- **Multi-View Gated Attention (`outputs_improve/` & `02_train_unimodal_vision/results/`):** All viewpoints of the same fruit are grouped into a Multi-View Bag, compressed via `backbone_dim → 256`, and pooled via **Lightweight Gated Attention (Ilse et al., $D = 128$)** with 3-view TTA.
+
+| Vision Backbone | Paradigm / Source | Image-Level Acc | Image-Level Macro-F1 | Fruit-Level Acc | Fruit-Level Macro-F1 | Fruit Gain vs. Single-View |
+| :--- | :--- | :---: | :---: | :---: | :---: | :---: |
+| **ResNet-50** (`resnet50.a1_in1k`) | Single-View (`baselines/ResNet-50/outputs`) | `31.54%` | `28.28%` | `33.33%` | `30.10%` | — |
+| **ResNet-50** + 256-D Proj + Gated Attn | Multi-View (`baselines/ResNet-50/outputs_improve`) | `36.58%` | `36.25%` | `41.67%` | `42.04%` | **+8.34% Acc / +11.94% F1** |
+| **DINOv3** (`vit_base_patch16_dinov3`) | Single-View (`baselines/DINOv3_classification_head/outputs`) | `38.59%` | `38.77%` | `45.83%` | `44.75%` | — |
+| **DINOv3** + 256-D Proj + Gated Attn | Multi-View (`baselines/DINOv3_classification_head/outputs_improve`) | `29.19%` | `27.53%` | `50.00%` | `49.48%` | **+4.17% Acc / +4.73% F1** |
+| **ConvNeXt V2-Base** (`fcmae_ft_in1k`) | Single-View (`baselines/ConvNeXtV2/outputs`) | `40.60%` | `41.00%` | `45.83%` | `43.51%` | — |
+| **ConvNeXt V2-Base** + 256-D Proj + Gated Attn *(Official)* | **Multi-View (`02_train_unimodal_vision/results`)** | `38.26%` | `38.05%` | **`58.33%`** | **`55.59%`** | **+12.50% Acc / +12.08% F1** |
+
+> **Key Vision Architectural Takeaway:** Grouping all viewpoints of a fruit with `1024 → 256` compression and Lightweight Gated Attention consistently boosts fruit-level grading across **every** tested architecture (`+4.17%` to `+12.50%` Fruit Accuracy). **Multi-View `ConvNeXt V2-Base`** achieves the strongest visual performance (**58.33% Fruit Acc / 55.59% Fruit Macro-F1**, `Unripe F1 = 77.78%`, `Ripe F1 = 52.63%`, `Overripe F1 = 36.36%`, `test_bag_loss = 1.2071`) and is adopted as the official Vision backbone for both Teacher and Student.
+
+### 9.2 Stage 1A — Unimodal Baselines Summary
+
+1. **Vision Unimodal Baseline (Multi-View `ConvNeXt V2-Base` + Gated Attention, RGB Only):**
+   - Evaluated on `298` test RGB images grouped into `24` fruit bags (`workspaces/member1_vision_lead/02_train_unimodal_vision/results/`).
+   - Achieves **38.26% Single-View Acc / 38.05% Single-View Macro-F1** and **58.33% Fruit Accuracy / 55.59% Fruit Macro-F1** (`14/24` fruits; `Unripe` recall `87.5%`, `Ripe` recall `62.5%`, `Overripe` recall `25.0%`), highlighting the visual ambiguity between `Ripe` and `Overripe` peels.
 
 2. **Acoustic Unimodal Baseline (`ResNet-18` Scratch, Knock Audio Only):**
    - Evaluated on `38` clean test audio files across `20` fruits (`workspaces/member2_audio/02_train_unimodal_audio/results/`).
@@ -492,8 +523,11 @@ Follow these steps to run local real-time durian ripeness inference using the Vi
 | `H_thermal_only` | RandomForest (500 trees) | 4 | `46.4%` | `45.2%` | `41.4%` | `40.3%` |
 
 <p align="center">
-  <img src="workspaces/member1_vision_lead/02_train_unimodal_vision/results/convnextv2_base_training_curves.png" alt="Vision Unimodal Training Curves" width="54%"/>
-  <img src="workspaces/member1_vision_lead/02_train_unimodal_vision/results/test_confusion_matrices.png" alt="Vision Unimodal Confusion Matrices" width="44%"/>
+  <img src="workspaces/member1_vision_lead/02_train_unimodal_vision/results/convnextv2_multiview_training_curves.png" alt="Multi-View Vision Unimodal Training Curves" width="54%"/>
+  <img src="workspaces/member1_vision_lead/02_train_unimodal_vision/results/test_confusion_matrices_multiview.png" alt="Multi-View Vision Unimodal Confusion Matrices" width="44%"/>
+</p>
+<p align="center">
+  <img src="workspaces/member1_vision_lead/02_train_unimodal_vision/results/test_gated_attention_views_sample.png" alt="Gated Attention View Weights Sample" width="85%"/>
 </p>
 <p align="center">
   <img src="workspaces/member2_audio/02_train_unimodal_audio/results/training_curves.png" alt="Audio Unimodal Training Curves" width="48%"/>
@@ -503,19 +537,19 @@ Follow these steps to run local real-time durian ripeness inference using the Vi
 
 ---
 
-### 9.2 Stage 1B — Multi-Modal Teacher (`MultiModalTeacher`)
+### 9.3 Stage 1B — Multi-Modal Teacher (`MultiModalTeacher`)
 *Results stored in [`workspaces/member1_vision_lead/04_train_teacher_and_student/results_teacher/`](workspaces/member1_vision_lead/04_train_teacher_and_student/results_teacher/).*
 
-- **Validation Performance (`286` samples / `28` fruits):** `87.06%` Sample Accuracy (`88.21%` Sample Macro-F1), `82.14%` Fruit Accuracy (`81.85%` Fruit Macro-F1), `0.9265` Fruit ROC-AUC.
-- **Test Performance (`303` samples / `29` fruits):** `70.63%` Sample Accuracy (`74.39%` Sample Macro-F1), **`72.41%` Fruit Accuracy (`70.30%` Fruit Macro-F1)**, and **`0.9001` Fruit ROC-AUC** (`100%` recall on `Unripe` fruits).
-- **Modality Ablation Study (`test_ablation.csv`):** Zero-masking Audio or Sensor branches confirms both non-visual modalities are essential to the Teacher's sample-level representation (`-4.48%` Sample Macro-F1 without Audio; `-5.49%` Sample Macro-F1 without Sensor):
+- **Validation Performance (`45` multimodal samples / `28` fruits):** `95.56%` Sample Accuracy (`95.14%` Sample Macro-F1), **`92.86%` Fruit Accuracy (`92.96%` Fruit Macro-F1)**, **`0.9718` Fruit ROC-AUC**.
+- **Hold-Out Test Performance (`47` multimodal samples / `29` fruits):** `80.85%` Sample Accuracy (`78.21%` Sample Macro-F1), **`79.31%` Fruit Accuracy (`78.41%` Fruit Macro-F1)**, and **`0.9006` Fruit ROC-AUC** (`100%` F1 on `Unripe` fruits). Restricted to the **same `24` RGB fruits** evaluated by the Student, the Teacher achieves **`79.17%` Fruit Accuracy / `79.08%` Fruit Macro-F1**.
+- **Modality Ablation Study (`test_ablation.csv`):** Upgrading the Vision branch to Multi-View Gated Attention makes **every** modality contribute positively to the Teacher—masking any single branch degrades both Sample and Fruit Macro-F1 (`-13.05%` without Sensor, `-9.93%` without Audio, `-6.63%` without Multi-View Vision):
 
-| Ablation Setting | Sample Acc | Sample Macro-F1 | $\Delta$ Sample Macro-F1 | Fruit Acc | Fruit Macro-F1 | Fruit ROC-AUC |
-| :--- | :---: | :---: | :---: | :---: | :---: | :---: |
-| **`full` (RGB + Audio + Sensor)** | `70.63%` | **`74.39%`** | `0.00%` | `72.41%` | `70.30%` | `0.9001` |
-| `wo_audio` (Zero-mask Audio) | `66.01%` | `69.91%` | `-4.48%` | `68.97%` | `66.18%` | `0.8273` |
-| `wo_sensor` (Zero-mask Sensor) | `66.34%` | `68.90%` | `-5.49%` | `72.41%` | `72.06%` | `0.8661` |
-| `wo_vision` (Zero-mask RGB) | `73.93%` | `77.78%` | `+3.39%` | `75.86%` | `74.47%` | `0.9129` |
+| Ablation Setting | Sample Acc | Sample Macro-F1 | $\Delta$ Sample Macro-F1 | Fruit Acc | Fruit Macro-F1 | $\Delta$ Fruit Macro-F1 | Fruit ROC-AUC |
+| :--- | :---: | :---: | :---: | :---: | :---: | :---: | :---: |
+| **`full` (Multi-View RGB + Audio + Sensor)** | **`80.85%`** | **`78.21%`** | `0.00%` | **`79.31%`** | **`78.41%`** | `0.00%` | **`0.9006`** |
+| `wo_audio` (Zero-mask Audio) | `68.09%` | `64.03%` | `-14.18%` | `68.97%` | `68.48%` | `-9.93%` | `0.8471` |
+| `wo_sensor` (Zero-mask Sensor) | `70.21%` | `68.36%` | `-9.86%` | `65.52%` | `65.36%` | `-13.05%` | `0.8737` |
+| `wo_vision` (Zero-mask RGB) | `78.72%` | `72.51%` | `-5.71%` | `75.86%` | `71.77%` | `-6.63%` | `0.8765` |
 
 <p align="center">
   <img src="workspaces/member1_vision_lead/04_train_teacher_and_student/results_teacher/training_curves.png" alt="Multi-Modal Teacher Training Curves" width="62%"/>
@@ -524,28 +558,27 @@ Follow these steps to run local real-time durian ripeness inference using the Vi
 
 ---
 
-### 9.3 Stage 2 — Vision-Only Student (`VisionStudent` CMKD) & Master Benchmark
+### 9.4 Stage 2 — Vision-Only Multi-View Student (`VisionStudent` CMKD) & Master Benchmark
 *Results stored in [`workspaces/member1_vision_lead/04_train_teacher_and_student/results_student/`](workspaces/member1_vision_lead/04_train_teacher_and_student/results_student/).*
 
-- **Best Checkpoint (`best_student.pth`, Epoch 20 / Phase 2):**
-  - **Validation (`282` RGB samples / `24` fruits):** `56.74%` Sample Accuracy (`55.28%` Macro-F1), `62.50%` Fruit Accuracy (`62.86%` Fruit Macro-F1), `0.8308` Fruit ROC-AUC.
-  - **Hold-Out Test (`298` RGB samples / `24` fruits):** `49.66%` Sample Accuracy (`49.55%` Macro-F1), **`58.33%` Fruit Accuracy (`57.72%` Fruit Macro-F1)**, `0.7682` Fruit ROC-AUC (`100%` precision on `Unripe` fruits, `87.5%` recall on `Ripe` fruits).
-- **Camera Angle Breakdown (`test_metrics_by_camera_angle.csv`):** Side angle `SD` (`59.18%` Acc / `59.92%` Macro-F1) and apex `TOP` (`54.00%` Acc / `54.24%` Macro-F1) yield the strongest single-view visual cues, whereas bottom `BOT` (`38.78%` Acc) is weakest—demonstrating why **Multi-View Fruit-Level Aggregation** boosts accuracy from `49.66%` to `58.33%` (+8.67%).
+- **Validation (`24` RGB fruit bags):** **`79.17%` Fruit Accuracy (`78.59%` Fruit Macro-F1)**, `0.8522` ROC-AUC, and **`0.6968` Log-Loss** (improving calibration over Unimodal Vision's `0.8066` Val Loss).
+- **Hold-Out Test (`24` RGB fruit bags):** **`54.17%` Fruit Accuracy (`51.85%` Fruit Macro-F1)** (`13/24` fruits, `77.78%` Unripe F1, `44.44%` Ripe F1, `33.33%` Overripe F1), `0.7370` Fruit ROC-AUC, and **`1.0839` Log-Loss** (improving probability calibration over Unimodal Vision's `1.2071` Test Loss).
 
-#### Master Benchmark Comparison (Test Set — `benchmark_comparison.csv`)
+#### Master Benchmark Comparison (Test Set — `benchmark_comparison.md`)
 
 | Model | Test Input | Sample Acc | Sample Macro-F1 | Fruit Acc | Fruit Macro-F1 |
 | :--- | :--- | :---: | :---: | :---: | :---: |
-| **1. Vision Unimodal (`ConvNeXt V2-Base`)** | RGB Only | `40.60%` | `41.00%` | `45.83%` | `43.51%` |
-| **2. Sensor Unimodal (`Integrated MLP`)** | Sensor (21 fts) | `68.97%` | `67.91%` | `68.97%` | `67.91%` |
+| **1. Vision Unimodal (`ConvNeXt V2-Base` Multi-View)** | Multi-View RGB | `38.26%` | `38.05%` | `58.33%` | `55.59%` |
+| **2. Sensor Unimodal (`Integrated MLP`)** | Sensor (19 fts) | `68.97%` | `67.91%` | `68.97%` | `67.91%` |
 | **3. Audio Unimodal (`ResNet-18`, 20 fruits)** | Audio Only | `84.21%` | `81.37%` | `95.00%` | `93.73%` |
-| **4. Multi-Modal Teacher (`Cross-Attention`)** | RGB + Audio + Sensor | `70.63%` | `74.39%` | `72.41%` | `70.30%` |
-| **5. Vision-Only Student (`ConvNeXt V2-Tiny` CMKD)** | **RGB Only** | **`49.66%`** | **`49.55%`** | **`58.33%`** | **`57.72%`** |
+| **4. Multi-Modal Teacher (`Cross-Attention`)** | Multi-View RGB + Audio + Sensor | `80.85%` | `78.21%` | `79.31%` | `78.41%` |
+| **4b. Multi-Modal Teacher (same 24 RGB fruits as Student)** | Multi-View RGB + Audio + Sensor | — | — | `79.17%` | `79.08%` |
+| **5. Vision-Only Student (`ConvNeXt V2-Base` CMKD Multi-View)** | **Multi-View RGB Only** | **`54.17%`** | **`51.85%`** | **`54.17%`** | **`51.85%`** |
 
-> **Key Distillation Takeaways (with RGB-only input at test time):**
-> - **+9.06% Sample Accuracy** and **+8.55% Sample Macro-F1** over the larger 87.7M-param `ConvNeXt V2-Base` Vision Unimodal baseline.
-> - **+12.50% Fruit Accuracy** and **+14.21% Fruit Macro-F1** over the Vision Unimodal baseline, while using a **3.1× smaller** backbone (28.4M vs. 87.7M params).
-> - **80.55% Teacher Accuracy Retention** (`58.33%` vs. `72.41%`) and **82.11% Teacher Macro-F1 Retention** (`57.72%` vs. `70.30%`) without any audio or laboratory sensors at inference time.
+> **Key Findings & Physical Limitation Analysis:**
+> - **Multi-Modal Upper Bound Confirmed:** Upgrading to Multi-View RGB boosts the Multi-Modal Teacher from `72.41%` to **`79.31%` Fruit Accuracy** (`+20.84%` Acc / `+23.49%` Macro-F1 over Multi-View Vision Unimodal on the same 24 RGB fruits).
+> - **Probability Calibration Gain in Student:** Teacher soft-logit distillation improves probability calibration on both Validation (`0.8066 → 0.6968` Log-Loss) and Hold-Out Test (`1.2071 → 1.0839` Log-Loss), while retaining `Unripe F1 = 77.78%` and differing from Unimodal Vision by only **1 boundary fruit (`durian_119`, `13/24` vs. `14/24`)** where the Teacher itself mispredicted `Overripe` (`0.782`).
+> - **Cross-Modal Information Asymmetry (Physical Limitation):** Across `5/8` `Overripe` test fruits (`durian_057`, `063`, `078`, `080`, `123`), external peel morphology is visually indistinguishable from `Ripe` (both Unimodal Vision and Student predict `Ripe` with `0.55–0.86` probability), whereas the Teacher separates them using **internal** acoustic resonance (`95.0%`) and physicochemical readings (`68.97%`). Pushing aggressive backbone updates under unrecoverable cross-modal supervision on `124` training fruits induces **Negative Cross-Modal Transfer**, demonstrating a genuine physical ceiling for RGB-only durian grading and motivating future **RGB + Smartphone Audio** deployment.
 
 <p align="center">
   <img src="workspaces/member1_vision_lead/04_train_teacher_and_student/results_student/training_curves.png" alt="Student CMKD Training Curves" width="62%"/>

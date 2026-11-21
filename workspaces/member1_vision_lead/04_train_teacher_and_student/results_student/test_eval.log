@@ -1,10 +1,10 @@
-[2026-11-09 15:13:44,292] [INFO] === BẮT ĐẦU QUY TRÌNH ĐÁNH GIÁ TOÀN DIỆN TEACHER MODEL ===
-[2026-11-09 15:13:44,292] [INFO] model=vision_student | split=test | input_mode=vision | strategy=mean_prob
-[2026-11-09 15:13:44,292] [INFO] Bắt đầu đánh giá cấp độ sample (mask_modality=None)...
-[2026-11-09 15:13:52,340] [INFO] Đã suy luận 298 sample, accuracy = 0.4966
-[2026-11-09 15:13:52,341] [INFO] Tổng hợp kết quả cấp độ quả (fruit_id) theo chiến lược: mean_prob...
-[2026-11-09 15:13:52,363] [INFO] Đã tổng hợp 24 quả, accuracy cấp quả = 0.5833
-[2026-11-09 15:13:53,137] [INFO] Bắt đầu phân tích đóng góp phương thức (Modality Ablation Study)...
-[2026-11-09 15:13:53,138] [INFO] Bỏ qua ablation vì mô hình đơn phương thức (input_mode=vision).
-[2026-11-09 15:13:53,142] [INFO] [test] sample Macro-F1 = 0.4955 | fruit Macro-F1 = 0.5772
-[2026-11-09 15:13:53,142] [INFO] === HOÀN TẤT ĐÁNH GIÁ ===
+[2026-11-21 04:23:47,751] [INFO] === STARTING FULL TEACHER EVALUATION PIPELINE ===
+[2026-11-21 04:23:47,751] [INFO] model=vision_student | split=test | input_mode=vision | strategy=mean_prob
+[2026-11-21 04:23:47,751] [INFO] Starting sample-level evaluation (mask_modality=None)...
+[2026-11-21 04:24:00,133] [INFO] Evaluated 24 samples, accuracy = 0.5417
+[2026-11-21 04:24:00,133] [INFO] Aggregating fruit-level predictions (fruit_id) using strategy: mean_prob...
+[2026-11-21 04:24:00,156] [INFO] Aggregated 24 fruits, fruit-level accuracy = 0.5417
+[2026-11-21 04:24:00,795] [INFO] Starting Modality Ablation Study...
+[2026-11-21 04:24:00,795] [INFO] Skipping ablation for unimodal model (input_mode=vision).
+[2026-11-21 04:24:00,799] [INFO] [test] sample Macro-F1 = 0.5185 | fruit Macro-F1 = 0.5185
+[2026-11-21 04:24:00,799] [INFO] === EVALUATION COMPLETE ===

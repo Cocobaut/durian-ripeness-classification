@@ -1,25 +1,26 @@
-"""Multimodal Dataset (RGB + Knock Sound + Sensor) for the Multi-Modal Teacher.
+"""Multimodal Dataset (Multi-View RGB Bag + Knock Sound + Sensor) for the Multi-Modal Teacher & Student.
 
 Project: Durian Ripeness Classification via Cross-Modal Knowledge Distillation (CMKD)
-Specification reference: Section 1.3.1 - each sample is a 5-tuple `(img, audio, sensor, label, fruit_id)`.
+Specification reference: Section 1.3.1 - each sample is a 5-tuple `(img_bag, audio, sensor, label, fruit_id)`
+(plus optional 6th element `extras` dict).
 
 Composed from 3 sub-datasets:
-- image_dataset.py  : image transforms (CLAHE, 384x384, ImageNet norm) matching the unimodal vision branch.
-- audio_dataset.py  : Member 2's AudioPreprocessor -> log-Mel [1, 64, 306].
+- image_dataset.py  : Multi-View RGB Fruit Bag (`[N_views, 3, 384, 384]`, CLAHE, ImageNet norm) matching
+                      the improved Multi-View ConvNeXt V2-Base + Lightweight Gated Attention branch.
+- audio_dataset.py  : Member 2's AudioPreprocessor -> log-Mel `[1, 64, 306]`.
 - sensor_dataset.py : 21 features C_integrated19 + mask, preprocessor fit on Train.
 
-Pairing rule (zero fruit-level leakage): all components of 1 sample belong to the SAME fruit.
-- Each RGB IMAGE of a fruit forms one sample (6-24 images / fruit).
-- Audio: Train randomly selects 1 audio file of the fruit per sample; Val/Test cycles deterministically
-  (image k uses file k % n) so both Android and iPhone recordings are evaluated.
-- Sensor: fruit-level feature vector (shared across all samples of the fruit).
+Pairing rule (zero fruit-level leakage): all components of 1 sample belong to the SAME fruit (`fruit_id`).
+- Vision: All RGB views belonging to `fruit_id` are grouped into a Multi-View Bag `{I_1, ..., I_N}`.
+  + During training: randomly subsamples `4..6` views per fruit per epoch (Random View Subsampling / View Dropout).
+  + During Val/Test: loads all available views of the fruit so Lightweight Gated Attention pools every angle.
+- Audio: Each audio recording of the fruit (`android` / `iphone`) is paired with the fruit's Multi-View RGB Bag
+  and Sensor vector so all recordings and both devices are trained and evaluated.
+- Sensor: fruit-level feature vector `[21]`.
 
 Missing modality (manifest: some fruits lack audio / RGB): corresponding tensor = 0.
 MultiModalTeacher treats an all-zero input as "absent" and masks that branch's features
-(which is also how eval_teacher.py performs zero-masking ablation).
-
-The 6th element (dict) carries auxiliary metadata `camera_angle`, `device` so eval_teacher.py can
-break down metrics (if only 5 elements are needed, set `return_extras=False`).
+(which is also how `eval_teacher.py` performs zero-masking ablation).
 """
 
 from __future__ import annotations
@@ -33,7 +34,16 @@ import torch
 from torch.utils.data import Dataset, get_worker_info
 
 from src.datasets.audio_dataset import AudioKnockBank, build_audio_preprocessor, list_audio_files
-from src.datasets.image_dataset import IMAGE_SIZE, get_eval_transforms, get_train_transforms, list_rgb_images, load_rgb
+from src.datasets.image_dataset import (
+    IMAGE_SIZE,
+    MAX_EVAL_VIEWS,
+    MAX_TRAIN_VIEWS,
+    MIN_TRAIN_VIEWS,
+    get_eval_transforms,
+    get_train_transforms,
+    list_rgb_images,
+    load_multiview_bag_tensor,
+)
 from src.datasets.sensor_dataset import (
     OFFICIAL_SENSOR_COLS,
     SENSOR_PREPROCESSOR_PATH,
@@ -53,7 +63,7 @@ def split_dir_name(split: str) -> str:
 
 
 class MultimodalDataset(Dataset):
-    """Multimodal dataset synchronized by fruit_id.
+    """Multimodal dataset synchronized by `fruit_id` with Multi-View RGB Fruit Bags.
 
     Supports 2 initialization styles:
     1. Direct (convenient):
@@ -80,13 +90,15 @@ class MultimodalDataset(Dataset):
         return_extras: bool = True,
         sensor_cache_dir: Union[str, Path] = SENSOR_RESULTS_DIR,
         sensor_preprocessor_path: Optional[Union[str, Path]] = SENSOR_PREPROCESSOR_PATH,
+        min_train_views: int = MIN_TRAIN_VIEWS,
+        max_train_views: int = MAX_TRAIN_VIEWS,
+        max_eval_views: int = MAX_EVAL_VIEWS,
     ):
         if img_size is not None:
             image_size = img_size
 
         # Distinguish between the 2 constructor call patterns
         if isinstance(manifest_or_data_dir, pd.DataFrame):
-            # Style 2: MultimodalDataset(split, manifest_df, data_dir, sensor_vecs, audio_bank, ...)
             resolved_split = split_dir_name(str(split_or_manifest))
             manifest = manifest_or_data_dir
             resolved_data_dir = Path(data_dir)
@@ -94,7 +106,6 @@ class MultimodalDataset(Dataset):
                 bool(is_training) if is_training is not None else (resolved_split == "train")
             )
         else:
-            # Style 1: MultimodalDataset(manifest_path, data_dir, split="train", is_training=True)
             manifest_path = Path(split_or_manifest)
             resolved_data_dir = Path(manifest_or_data_dir)
             resolved_split = split_dir_name(split or "train")
@@ -127,9 +138,12 @@ class MultimodalDataset(Dataset):
         self.sensor_vecs = sensor_vecs
         self.audio_bank = audio_bank
         self.sensor_dim = sensor_dim
-        self.image_size = image_size
+        self.image_size = int(image_size)
+        self.min_train_views = int(min_train_views)
+        self.max_train_views = int(max_train_views)
+        self.max_eval_views = int(max_eval_views)
         self.audio_shape = tuple(audio_bank.output_shape)
-        self.transform = get_train_transforms(image_size) if self.train else get_eval_transforms(image_size)
+        self.transform = get_train_transforms(self.image_size) if self.train else get_eval_transforms(self.image_size)
         self.seed = seed
         self.rng = np.random.default_rng(seed)
         self.return_extras = return_extras
@@ -137,21 +151,36 @@ class MultimodalDataset(Dataset):
         fruits = manifest[manifest["Split"] == self.split].sort_values("fruit_id")
         self.label_map: Dict[str, int] = dict(zip(fruits["fruit_id"], fruits["label_idx"].astype(int)))
         images = list_rgb_images(self.data_dir / self.split / "rgb")
-        img_by_fruit = {fid: g.to_dict("records") for fid, g in images.groupby("fruit_id")}
+        img_by_fruit = {
+            fid: g.sort_values("file").to_dict("records")
+            for fid, g in images.groupby("fruit_id")
+        }
         audio_by_fruit = audio_bank.by_fruit()
+
+        max_views_found = max((len(v) for v in img_by_fruit.values()), default=0)
+        if max_views_found == 0:
+            self.pad_views = 1
+        elif self.train:
+            self.pad_views = min(self.max_train_views, max_views_found)
+        else:
+            self.pad_views = min(self.max_eval_views, max_views_found)
 
         self.samples: List[Dict] = []
         for fid in self.label_map:
-            imgs = img_by_fruit.get(fid) or [None]  # fruits without RGB still keep 1 sample (image = 0)
+            img_list = img_by_fruit.get(fid, [])
+            img_paths = [img["path"] for img in img_list]
             audios = audio_by_fruit.get(fid, [])
-            for k, img in enumerate(imgs):
+            audio_entries = audios if audios else [None]
+            for a in audio_entries:
                 self.samples.append({
                     "fruit_id": fid,
                     "label": self.label_map[fid],
-                    "img_path": img["path"] if img else None,
-                    "camera_angle": img["camera_angle"] if img else "NONE",
+                    "img_paths": img_paths,
+                    "img_path": img_paths[0] if img_paths else None,
+                    "camera_angle": "MULTI_VIEW" if img_paths else "NONE",
+                    "num_views": len(img_paths),
+                    "audio": a,
                     "audios": audios,
-                    "eval_audio_idx": k % len(audios) if audios else -1,
                 })
 
         n_fr = len(self.label_map)
@@ -159,6 +188,8 @@ class MultimodalDataset(Dataset):
             "split": self.split,
             "n_fruits": n_fr,
             "n_samples": len(self.samples),
+            "n_rgb_views": int(len(images)),
+            "pad_views": int(self.pad_views),
             "fruits_without_rgb": sum(1 for f in self.label_map if f not in img_by_fruit),
             "fruits_without_audio": sum(1 for f in self.label_map if not audio_by_fruit.get(f)),
             "fruits_without_sensor": sum(1 for f in self.label_map if f not in sensor_vecs),
@@ -178,13 +209,27 @@ class MultimodalDataset(Dataset):
     def __getitem__(self, idx: int):
         s = self.samples[idx]
 
-        if s["img_path"] is not None:
-            img = self.transform(load_rgb(s["img_path"]))
+        if s["img_paths"]:
+            img, _num_valid = load_multiview_bag_tensor(
+                s["img_paths"],
+                transform=self.transform,
+                image_size=self.image_size,
+                is_train=self.train,
+                min_train_views=self.min_train_views,
+                max_train_views=self.max_train_views,
+                max_eval_views=self.max_eval_views,
+                pad_views=self.pad_views,
+                rng=self.rng,
+            )
         else:
-            img = torch.zeros(3, self.image_size, self.image_size)
+            img = torch.zeros(self.pad_views, 3, self.image_size, self.image_size, dtype=torch.float32)
 
-        if s["audios"]:
-            j = int(self.rng.integers(len(s["audios"]))) if self.train else s["eval_audio_idx"]
+        if s["audio"] is not None:
+            a = s["audio"]
+            audio = self.audio_bank.mel(a["path"], train=self.train, rng=self.rng)
+            device = a["device"]
+        elif s["audios"]:
+            j = int(self.rng.integers(len(s["audios"])))
             a = s["audios"][j]
             audio = self.audio_bank.mel(a["path"], train=self.train, rng=self.rng)
             device = a["device"]
@@ -203,7 +248,7 @@ class MultimodalDataset(Dataset):
 
 
 def worker_init_fn(worker_id: int) -> None:
-    """Assign each worker a distinct seed for audio augmentation (avoids identical random sequences)."""
+    """Assign each worker a distinct seed for view subsampling and audio augmentation."""
     info = get_worker_info()
     if info is not None and hasattr(info.dataset, "reseed"):
         info.dataset.reseed((torch.initial_seed() + worker_id) % (2 ** 32))
@@ -219,11 +264,15 @@ def build_multimodal_datasets(
     sensor_feature_cols=OFFICIAL_SENSOR_COLS,
     seed: int = 42,
     verbose: bool = True,
+    train_mode_splits: Optional[Iterable[str]] = None,
 ) -> Dict[str, MultimodalDataset]:
-    """Build MultimodalDataset for the requested splits (train => augmentation enabled).
+    """Build MultimodalDataset for the requested splits (train => view subsampling + augmentation enabled).
 
     The sensor preprocessor is always loaded/fit on the Train split (even when only Test is requested).
+    `train_mode_splits` (default: only "train") lists splits built in training mode, e.g. ("train", "valid")
+    when the Student is trained on Train + Val.
     """
+    train_mode = {split_dir_name(s) for s in (train_mode_splits or ("train",))}
     manifest = pd.read_csv(manifest_path)
     data_dir = Path(data_dir)
 
@@ -240,8 +289,17 @@ def build_multimodal_datasets(
         if verbose:
             print(f"[data] {sp}: extracting knocks from {len(files)} audio files ...", flush=True)
         bank = AudioKnockBank(files, audio_pre)
-        ds = MultimodalDataset(sp, manifest, data_dir, vecs, bank, train=(sp == "train"),
-                               image_size=image_size, sensor_dim=len(sensor_feature_cols), seed=seed)
+        ds = MultimodalDataset(
+            sp,
+            manifest,
+            data_dir,
+            vecs,
+            bank,
+            train=(sp in train_mode),
+            image_size=image_size,
+            sensor_dim=len(sensor_feature_cols),
+            seed=seed,
+        )
         if ds.stats["n_samples"] == 0:
             raise RuntimeError(f"Split {sp} has 0 samples. Check {data_dir / sp}.")
         if verbose:

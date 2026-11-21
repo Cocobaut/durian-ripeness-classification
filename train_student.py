@@ -5,7 +5,7 @@ Forwards all CLI arguments to the main module at:
 
 Usage (from the repository root):
     python train_student.py --smoke
-    python train_student.py --epochs 30 --batch-size 16 --eval-test --device cuda
+    python train_student.py --epochs 30 --batch-size 4 --accum-steps 2 --eval-test --device cuda
 """
 
 from __future__ import annotations

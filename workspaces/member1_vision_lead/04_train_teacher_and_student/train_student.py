@@ -28,13 +28,14 @@ Usage (from project root):
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
 import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, cast
 
 THIS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = THIS_DIR.parents[2]
@@ -50,12 +51,12 @@ import pandas as pd  # noqa: E402
 import torch  # noqa: E402
 import torch.nn.functional as F  # noqa: E402
 from sklearn.metrics import accuracy_score, f1_score  # noqa: E402
-from torch.utils.data import DataLoader, Subset  # noqa: E402
+from torch.utils.data import ConcatDataset, DataLoader, Subset  # noqa: E402
 
 from src.datasets.multimodal_dataset import build_multimodal_datasets, worker_init_fn  # noqa: E402
 from src.datasets.sensor_dataset import SENSOR_PREPROCESSOR_PATH, SENSOR_RESULTS_DIR  # noqa: E402
 from src.losses.classification_loss import compute_class_weights  # noqa: E402
-from src.losses.distillation_loss import CrossModalDistillationLoss  # noqa: E402
+from src.losses.distillation_loss import FEAT_LOSS_TYPES, KD_WEIGHTINGS, CrossModalDistillationLoss  # noqa: E402
 from src.models.student_model import (  # noqa: E402
     StudentConfig,
     VisionStudent,
@@ -83,13 +84,21 @@ TEACHER_CKPT_CANDIDATES = [
     "checkpoints/teachermodal/best_teacher.pth",
     "checkpoints/teacher/best_teacher.pth",
 ]
+VISION_CKPT_CANDIDATES = [
+    "checkpoints/unimodal/vision/best_convnextv2_multiview.pth",
+    "checkpoints/unimodal/vision/convnextv2_multiview_backbone_256d.pth",
+    "checkpoints/unimodal/vision/best_vision_unimodal.pth",
+    "checkpoints/unimodal/image/best_convnextv2_multiview.pth",
+    "checkpoints/unimodal/image/convnextv2_multiview_backbone_256d.pth",
+    "checkpoints/unimodal/image/best_vision_unimodal.pth",
+]
 
 
 # ------------------------------------------------------------------------------
 # 1. Command-line arguments
 # ------------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train Vision-Only Student via CMKD (Stage 2)")
+    p = argparse.ArgumentParser(description="Train Multi-View Vision-Only Student via CMKD (Stage 2)")
     # Data & Paths
     p.add_argument("--manifest", default="data/final/final_multimodal_manifest.csv")
     p.add_argument("--data-dir", default="data/final")
@@ -98,18 +107,20 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--teacher-ckpt", default="checkpoints/teachermodal/best_teacher.pth",
                    help="Path to best_teacher.pth checkpoint trained in Stage 1B")
     p.add_argument("--init-vision-ckpt", default=None,
-                   help="Optional: initialize from best_vision_unimodal.pth if architecture matches")
+                   help="Default: auto-search Multi-View ConvNeXtV2 checkpoint in checkpoints/unimodal/{vision,image}/")
+    p.add_argument("--no-unimodal-init", action="store_true",
+                   help="Do not auto-initialize Student from unimodal Multi-View ConvNeXtV2 checkpoint")
     p.add_argument("--save-path", default="checkpoints/studentmodal/best_student.pth")
     p.add_argument("--results-dir",
                    default="workspaces/member1_vision_lead/04_train_teacher_and_student/results_student")
 
     # Student architecture
-    p.add_argument("--student-backbone", default="convnextv2_tiny",
-                   help="Student backbone: convnextv2_tiny (default, ~28M), convnextv2_nano, convnextv2_base, resnet18...")
+    p.add_argument("--student-backbone", default="convnextv2_base",
+                   help="Student backbone: convnextv2_base (default, Multi-View + 256-d Proj + Gated Attention), convnextv2_tiny...")
     p.add_argument("--no-pretrained", action="store_true",
                    help="Disable loading ImageNet pretrained weights when initializing Student")
     p.add_argument("--drop-path", type=float, default=0.2)
-    p.add_argument("--head-dropout", type=float, default=0.2)
+    p.add_argument("--head-dropout", type=float, default=0.25)
     p.add_argument("--proj-hidden-dim", type=int, default=512)
 
     # Distillation Loss weights (Section 1.3.3)
@@ -117,8 +128,14 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--beta", type=float, default=2.0, help="Weight for L_KD (KL Divergence soft logits)")
     p.add_argument("--gamma", type=float, default=1.0, help="Weight for L_feat (latent f_mm alignment)")
     p.add_argument("--temperature", type=float, default=3.0, help="Softmax temperature T for L_KD")
-    p.add_argument("--feat-loss-type", default="cosine", choices=["cosine", "mse", "cosine_mse"],
-                   help="Distance function L_feat between phi(f_img) and f_mm")
+    p.add_argument("--feat-loss-type", default="cosine", choices=list(FEAT_LOSS_TYPES),
+                   help="Distance function L_feat between phi(f_img) and the Teacher target feature "
+                        "(relational = match in-batch similarity structure instead of absolute features)")
+    p.add_argument("--feat-target", default="fused", choices=["fused", "vision"],
+                   help="Teacher feature aligned by L_feat: 'fused' = f_mm (contains audio/sensor info), "
+                        "'vision' = Teacher's own vision-branch embedding (learnable from RGB alone)")
+    p.add_argument("--kd-weighting", default="none", choices=list(KD_WEIGHTINGS),
+                   help="Per-sample L_KD weighting: none | teacher_correct | teacher_confidence")
     p.add_argument("--loss-type", default="cost_sensitive_focal",
                    choices=["cost_sensitive_focal", "focal", "ce"],
                    help="Student L_CE loss type")
@@ -130,18 +147,36 @@ def parse_args() -> argparse.Namespace:
     # Training hyperparameters
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--warmup-epochs", type=int, default=3,
-                   help="Initial epochs to freeze backbone and stabilize ProjectionHead + Classifier")
-    p.add_argument("--batch-size", type=int, default=16)
-    p.add_argument("--accum-steps", type=int, default=1)
+                   help="Initial epochs to freeze VisionBackbone and stabilize ProjectionHead + Classifier")
+    p.add_argument("--batch-size", type=int, default=4, help="Multi-view fruit-bag batch size")
+    p.add_argument("--accum-steps", type=int, default=2, help="Gradient accumulation steps")
     p.add_argument("--lr", type=float, default=5e-4, help="LR for ProjectionHead + Classifier")
-    p.add_argument("--lr-backbone", type=float, default=1e-4, help="LR for VisionBackbone in Phase 2")
+    p.add_argument("--lr-backbone", type=float, default=1.5e-5, help="LR for VisionBackbone in Phase 2")
     p.add_argument("--min-lr", type=float, default=1e-6)
     p.add_argument("--weight-decay-head", type=float, default=1e-2)
     p.add_argument("--weight-decay-backbone", type=float, default=1e-4)
     p.add_argument("--patience", type=int, default=10, help="Early stopping patience in Phase 2")
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--select-metric", default="fruit_macro_f1",
-                   choices=["sample_macro_f1", "fruit_macro_f1", "val_loss"])
+                   choices=["sample_macro_f1", "fruit_macro_f1", "val_loss", "last"],
+                   help="'last' = fixed-epoch training: keep the final epoch (required when Val is in --train-splits)")
+    p.add_argument("--train-splits", default="train",
+                   help="Comma-separated splits used for distillation, e.g. 'train' or 'train,valid' "
+                        "(Teacher was trained on Train only, so its Val soft labels are genuinely out-of-sample)")
+    p.add_argument("--ema-decay", type=float, default=0.0,
+                   help="If > 0, keep an EMA of Student weights (e.g. 0.99) and validate/save the EMA model")
+    p.add_argument("--dedup-fruits", action="store_true",
+                   help="Deduplicate MultimodalDataset to 1 sample per RGB fruit per epoch (randomly sampling "
+                        "1 audio file per fruit each epoch) to prevent audio-count bias and flipped class weights")
+    p.add_argument("--mixup-alpha", type=float, default=0.0,
+                   help="Feature-Space Mixup Beta(alpha, alpha) on 256-d F_rgb in Phase 2 (e.g. 0.2; 0 disables)")
+    p.add_argument("--mixup-prob", type=float, default=0.5,
+                   help="Probability of applying Feature-Space Mixup to a Phase 2 batch when --mixup-alpha > 0")
+    p.add_argument("--l2-sp-weight", type=float, default=0.0,
+                   help="L2-SP regularization weight anchoring Student VisionBackbone to its initial unimodal weights "
+                        "during Phase 2 (e.g. 1e-3; 0 disables)")
+    p.add_argument("--no-tta", action="store_true",
+                   help="Disable 3-view TTA (orig + hflip + 95%% zoom) during validation and final evaluation")
 
     # Hardware & Utilities
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -185,13 +220,86 @@ def amp_settings(device: torch.device, enabled: bool):
 
 def filter_rgb_indices(multimodal_ds) -> List[int]:
     """Keep only samples with real RGB images on disk (drop image = 0 samples from RGB-missing fruits)."""
-    indices = [i for i, s in enumerate(multimodal_ds.samples) if s.get("img_path") is not None]
+    indices = [
+        i for i, s in enumerate(multimodal_ds.samples)
+        if bool(s.get("img_paths")) or (s.get("img_path") is not None)
+    ]
     if not indices:
         logger.warning(
             "No RGB image files found in data_dir (local/smoke run without images) -> using all manifest samples."
         )
         return list(range(len(multimodal_ds)))
     return indices
+
+
+class FruitDedupMultimodalDataset(torch.utils.data.Dataset):
+    """Wrap a MultimodalDataset so each unique `fruit_id` appears exactly once per epoch.
+
+    When a fruit has multiple audio files (e.g. android + iphone), one is chosen uniformly at random
+    on each access, giving unbiased fruit-level RGB sampling and true fruit-level class weights while
+    still leveraging all audio recordings for Teacher distillation.
+    """
+
+    def __init__(self, base_ds, indices: List[int], seed: int = 42) -> None:
+        self.base_ds = base_ds
+        groups: Dict[str, List[int]] = {}
+        for idx in indices:
+            fid = base_ds.samples[idx]["fruit_id"]
+            groups.setdefault(fid, []).append(idx)
+        self.fruit_ids: List[str] = sorted(groups.keys())
+        self.fruit_groups: List[List[int]] = [groups[fid] for fid in self.fruit_ids]
+        self.labels: List[int] = [int(base_ds.samples[g[0]]["label"]) for g in self.fruit_groups]
+        self.rng = np.random.default_rng(seed)
+
+    def reseed(self, seed: int) -> None:
+        self.rng = np.random.default_rng(seed)
+        if hasattr(self.base_ds, "reseed"):
+            self.base_ds.reseed(seed)
+
+    def __len__(self) -> int:
+        return len(self.fruit_groups)
+
+    def __getitem__(self, i: int):
+        grp = self.fruit_groups[i]
+        chosen = grp[0] if len(grp) == 1 else grp[int(self.rng.integers(len(grp)))]
+        return self.base_ds[chosen]
+
+
+def compute_l2_sp_loss(
+    backbone: torch.nn.Module,
+    anchor_params: Dict[str, torch.Tensor],
+) -> torch.Tensor:
+    """Mean-squared deviation of trainable backbone weights from their initial unimodal snapshot (L2-SP)."""
+    total = None
+    n_elems = 0
+    for name, p in backbone.named_parameters():
+        if not p.requires_grad or name not in anchor_params:
+            continue
+        diff = p.float() - anchor_params[name].to(device=p.device, dtype=torch.float32)
+        term = diff.pow(2).sum()
+        total = term if total is None else (total + term)
+        n_elems += p.numel()
+    if total is None or n_elems == 0:
+        return next(backbone.parameters()).sum() * 0.0
+    return total / float(n_elems)
+
+
+class ModelEMA:
+    """Exponential Moving Average of Student weights (smoother, less val-noise-dependent checkpoints)."""
+
+    def __init__(self, model: torch.nn.Module, decay: float) -> None:
+        self.decay = float(decay)
+        self.module = copy.deepcopy(model).eval()
+        for p in self.module.parameters():
+            p.requires_grad = False
+
+    @torch.no_grad()
+    def update(self, model: torch.nn.Module) -> None:
+        for ema_v, v in zip(self.module.state_dict().values(), model.state_dict().values()):
+            if ema_v.dtype.is_floating_point:
+                ema_v.mul_(self.decay).add_(v.detach(), alpha=1.0 - self.decay)
+            else:
+                ema_v.copy_(v)
 
 
 def _atomic_torch_save(payload: Dict, target: Path) -> None:
@@ -205,15 +313,23 @@ def load_frozen_teacher(args, device: torch.device) -> MultiModalTeacher:
     search = ([args.teacher_ckpt] if args.teacher_ckpt else []) + list(TEACHER_CKPT_CANDIDATES)
     ckpt_path = first_existing(search)
     if ckpt_path is not None:
-        logger.info(f"Loading Frozen Teacher from: {ckpt_path}")
-        return build_teacher_from_checkpoint(ckpt_path, device=device, eval_mode=True)
+        try:
+            logger.info(f"Loading Frozen Teacher from: {ckpt_path}")
+            return build_teacher_from_checkpoint(ckpt_path, device=device, eval_mode=True)
+        except Exception as exc:
+            if not args.smoke:
+                raise RuntimeError(
+                    f"Teacher checkpoint at {ckpt_path} belongs to an older architecture ({exc}). "
+                    "Please re-train the Multi-Modal Teacher first (`01_train_multimodal_teacher.ipynb` / `train_teacher.py`)."
+                ) from exc
+            logger.warning(f"--smoke mode: existing Teacher checkpoint incompatible ({type(exc).__name__}), using smoke Teacher.")
 
     if args.smoke:
         logger.warning("--smoke mode: best_teacher.pth not found, initializing lightweight Teacher for pipeline test.")
         t_cfg = TeacherConfig(
             vision_model_name="resnet18",
             vision_drop_path=0.0,
-            vision_dim=512,
+            vision_dim=256,
             audio_dim=512,
             sensor_input_dim=21,
             sensor_latent_dim=32,
@@ -249,7 +365,22 @@ def train_one_epoch(
     grad_clip: float,
     max_batches: int,
     desc: str,
+    feat_target: str = "fused",
+    ema: Optional[ModelEMA] = None,
+    mixup_alpha: float = 0.0,
+    mixup_prob: float = 0.5,
+    anchor_backbone_params: Optional[Dict[str, torch.Tensor]] = None,
+    l2_sp_weight: float = 0.0,
 ) -> Dict[str, float]:
+    """One distillation epoch.
+
+    feat_target: "fused" aligns phi(f_img) with Teacher f_mm; "vision" aligns it with the Teacher's
+                 vision-branch embedding (details["features"]["vision"]).
+    ema: if given, updated after every optimizer step.
+    mixup_alpha: if > 0, applies Feature-Space Mixup on 256-d F_rgb with probability `mixup_prob`.
+    anchor_backbone_params / l2_sp_weight: if provided and > 0, adds L2-SP penalty anchoring
+                 `student.vision_backbone` to its initial unimodal weights.
+    """
     student.train()
     teacher.eval()
     optimizer.zero_grad(set_to_none=True)
@@ -268,11 +399,38 @@ def train_one_epoch(
 
         ctx = torch.autocast(device.type, dtype=amp_dtype) if amp_on else nullcontext()
         with torch.no_grad(), ctx:
-            logits_t, f_mm_t = teacher(img, audio, sensor)
+            if feat_target == "vision":
+                logits_t, _f_mm_t, details_t = teacher(img, audio, sensor, return_details=True)
+                feat_t = details_t["features"]["vision"]
+            else:
+                logits_t, feat_t = teacher(img, audio, sensor)
 
+        use_mixup = (mixup_alpha > 0.0) and (label.size(0) >= 2) and (np.random.rand() < mixup_prob)
         with ctx:
-            logits_s, _f_img_s, f_proj_s = student(img, return_features=True)
-            loss, parts = criterion(logits_s, logits_t, f_proj_s, f_mm_t, label)
+            if use_mixup:
+                f_img_s = student.vision_backbone(img)
+                lam = float(np.random.beta(mixup_alpha, mixup_alpha))
+                perm = torch.randperm(label.size(0), device=device)
+                f_mix = lam * f_img_s + (1.0 - lam) * f_img_s[perm]
+                logits_s = student.classifier(f_mix)
+                f_proj_s = student.projection_head(f_mix)
+                loss, parts = criterion.forward_mixup(
+                    logits_s,
+                    logits_t,
+                    logits_t[perm],
+                    f_proj_s,
+                    feat_t,
+                    feat_t[perm],
+                    label,
+                    label[perm],
+                    lam,
+                )
+            else:
+                logits_s, _f_img_s, f_proj_s = student(img, return_features=True)
+                loss, parts = criterion(logits_s, logits_t, f_proj_s, feat_t, label)
+
+            if l2_sp_weight > 0.0 and anchor_backbone_params is not None and not student.backbone_frozen:
+                loss = loss + l2_sp_weight * compute_l2_sp_loss(student.vision_backbone, anchor_backbone_params)
 
         scaler.scale(loss / accum_steps).backward()
         if (step + 1) % accum_steps == 0 or (step + 1) == n_batches:
@@ -282,6 +440,8 @@ def train_one_epoch(
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
+            if ema is not None:
+                ema.update(student)
 
         bs = label.size(0)
         tot_loss += parts["loss_total"] * bs
@@ -317,6 +477,7 @@ def validate_student(
     amp_on: bool,
     amp_dtype: torch.dtype,
     max_batches: int = 0,
+    tta: bool = False,
 ) -> Dict[str, float]:
     """Evaluate Student on Val USING ONLY RGB IMAGES (no Teacher, Audio, or Sensor)."""
     student.eval()
@@ -327,7 +488,7 @@ def validate_student(
         img, label, fid = batch[0].to(device, non_blocking=True), batch[1], batch[2]
         ctx = torch.autocast(device.type, dtype=amp_dtype) if amp_on else nullcontext()
         with ctx:
-            logits = student(img, return_features=False)
+            logits = student(img, return_features=False, tta=tta)
         probs_all.append(F.softmax(logits.float(), dim=-1).cpu())
         y_all.append(label)
         fids.extend(fid)
@@ -351,8 +512,25 @@ def validate_student(
     }
 
 
+def parse_train_splits(value: str) -> tuple:
+    """'train,valid' -> ('train', 'valid'); 'val' is normalized to 'valid'."""
+    splits = []
+    for s in value.split(","):
+        s = s.strip().lower()
+        if not s:
+            continue
+        s = "valid" if s == "val" else s
+        if s not in ("train", "valid"):
+            raise ValueError(f"--train-splits only supports 'train' and 'valid', got {s!r}")
+        if s not in splits:
+            splits.append(s)
+    if "train" not in splits:
+        raise ValueError("--train-splits must include 'train'")
+    return tuple(splits)
+
+
 def is_better(metrics: Dict[str, float], best: Dict[str, float], key: str) -> bool:
-    if not best:
+    if not best or key == "last":
         return True
     if key == "val_loss":
         return metrics["val_loss"] < best["val_loss"] - 1e-6
@@ -402,7 +580,12 @@ def main() -> None:
     results_dir = resolve_path(args.results_dir)
     save_path = resolve_path(args.save_path)
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    last_name = "smoke_last_student.pth" if args.smoke else "last_student.pth"
+    if args.smoke:
+        last_name = "smoke_last_student.pth"
+    elif save_path.name == "best_student.pth":
+        last_name = "last_student.pth"
+    else:  # e.g. student_trainval_s43.pth -> last_student_trainval_s43.pth (one resume file per run/seed)
+        last_name = f"last_{save_path.stem}.pth"
     last_path = resolve_path(args.resume) if args.resume else save_path.with_name(last_name)
     resuming = (not args.fresh) and (not args.eval_only) and last_path.is_file()
 
@@ -425,6 +608,7 @@ def main() -> None:
             save_path, args.manifest, args.data_dir, "valid", results_dir,
             batch_size=args.batch_size, num_workers=args.num_workers,
             image_size=args.image_size, device=device, smoke=args.smoke, seed=args.seed,
+            tta=not args.no_tta,
         )
         logger.info(f"VAL  | sample F1 {res_val['metrics']['sample_macro_f1']:.4f} | fruit F1 {res_val['metrics']['fruit_macro_f1']:.4f}")
         if args.eval_test:
@@ -432,6 +616,7 @@ def main() -> None:
                 save_path, args.manifest, args.data_dir, "test", results_dir,
                 batch_size=args.batch_size, num_workers=args.num_workers,
                 image_size=args.image_size, device=device, smoke=args.smoke, seed=args.seed,
+                tta=not args.no_tta,
             )
             logger.info(f"TEST | sample F1 {res_test['metrics']['sample_macro_f1']:.4f} | fruit F1 {res_test['metrics']['fruit_macro_f1']:.4f}")
             if not args.smoke:
@@ -440,27 +625,51 @@ def main() -> None:
 
     # ---- 1. Load Frozen Teacher ------------------------------------------------
     teacher = load_frozen_teacher(args, device)
-    latent_dim_mm = int(teacher.config.latent_dim_mm)
+    # Student projection head output must match the Teacher feature used as L_feat target
+    if args.feat_target == "vision":
+        latent_dim_mm = int(teacher.config.vision_dim)
+    else:
+        latent_dim_mm = int(teacher.config.latent_dim_mm)
+    logger.info(f"L_feat target: Teacher '{args.feat_target}' feature ({latent_dim_mm}-d) | "
+                f"KD weighting: {args.kd_weighting} | EMA: {args.ema_decay or 'off'} | TTA: {not args.no_tta}")
 
     # ---- 2. Build Datasets -----------------------------------------------------
     # Train requires MultimodalDataset (so Teacher gets img + audio + sensor), filtered to samples with real RGB images
+    train_splits = parse_train_splits(args.train_splits)
     mm_datasets = build_multimodal_datasets(
         resolve_path(args.manifest),
         resolve_path(args.data_dir),
         image_size=args.image_size,
         seed=args.seed,
-        splits=("train",),
+        splits=train_splits,
         sensor_cache_dir=resolve_path(args.sensor_cache_dir),
         sensor_preprocessor_path=resolve_path(args.sensor_preprocessor),
+        train_mode_splits=train_splits,
     )
-    full_train_ds = mm_datasets["train"]
-    rgb_train_indices = filter_rgb_indices(full_train_ds)
-    train_labels = [full_train_ds.samples[i]["label"] for i in rgb_train_indices]
-    train_ds = Subset(full_train_ds, rgb_train_indices)
+    subsets, train_labels = [], []
+    for sp in train_splits:
+        ds_sp = mm_datasets[sp]
+        idx = filter_rgb_indices(ds_sp)
+        if args.dedup_fruits:
+            dedup_ds = FruitDedupMultimodalDataset(ds_sp, idx, seed=args.seed)
+            train_labels += dedup_ds.labels
+            subsets.append(dedup_ds)
+        else:
+            train_labels += [ds_sp.samples[i]["label"] for i in idx]
+            subsets.append(Subset(ds_sp, idx))
+    train_ds = subsets[0] if len(subsets) == 1 else ConcatDataset(subsets)
 
     # Val uses ImageDataset only (RGB-Only), matching Student's deployment conditions
     val_ds = build_vision_eval_dataset(args.manifest, args.data_dir, split="valid", image_size=args.image_size)
-    logger.info(f"[data] Train RGB samples: {len(train_ds)} | Val RGB samples: {len(val_ds)}")
+    logger.info(
+        f"[data] Train splits {train_splits} (dedup_fruits={args.dedup_fruits}) -> "
+        f"RGB samples: {len(train_ds)} | Val RGB samples: {len(val_ds)}"
+    )
+    if "valid" in train_splits:
+        logger.warning(
+            "Val fruits are part of the training set: validation metrics are in-sample (monitoring only). "
+            "Use --select-metric last (fixed-epoch training) and judge the model on Test only."
+        )
 
     train_loader = DataLoader(
         train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
@@ -474,6 +683,14 @@ def main() -> None:
     )
 
     # ---- 3. Initialize VisionStudent -------------------------------------------
+    init_vision_ckpt = None
+    if not args.no_unimodal_init and not args.smoke:
+        init_vision_ckpt = first_existing(
+            ([args.init_vision_ckpt] if args.init_vision_ckpt else []) + list(VISION_CKPT_CANDIDATES)
+        )
+    elif args.init_vision_ckpt:
+        init_vision_ckpt = first_existing([args.init_vision_ckpt])
+
     s_cfg = StudentConfig(
         backbone_name=args.student_backbone,
         pretrained=not args.no_pretrained,
@@ -483,10 +700,19 @@ def main() -> None:
         latent_dim_mm=latent_dim_mm,
         head_dropout=args.head_dropout,
     )
-    student = VisionStudent(s_cfg, vision_ckpt=resolve_path(args.init_vision_ckpt) if args.init_vision_ckpt else None)
+    student = VisionStudent(s_cfg, vision_ckpt=init_vision_ckpt)
     student.to(device)
+    anchor_backbone_params: Optional[Dict[str, torch.Tensor]] = None
+    if args.l2_sp_weight > 0.0:
+        anchor_backbone_params = {
+            name: p.detach().cpu().clone()
+            for name, p in student.vision_backbone.named_parameters()
+        }
+        logger.info(f"L2-SP anchor enabled (weight={args.l2_sp_weight}) on initial VisionBackbone weights.")
+    if init_vision_ckpt is not None:
+        logger.info(f"Initialized Student VisionBackbone from unimodal checkpoint: {init_vision_ckpt}")
     n_params = sum(p.numel() for p in student.parameters())
-    logger.info(f"Student: {n_params / 1e6:.1f}M params | f_img = {student.feat_dim} -> f_proj = {latent_dim_mm}")
+    logger.info(f"Student: {n_params / 1e6:.1f}M params | F_rgb = {student.feat_dim} -> f_proj = {latent_dim_mm}")
 
     # ---- 4. 3-Component Distillation Loss --------------------------------------
     class_w = None if args.no_class_weights else compute_class_weights(train_labels, len(CLASS_ORDER))
@@ -503,12 +729,14 @@ def main() -> None:
         label_smoothing=args.label_smoothing,
         focal_gamma=args.focal_gamma,
         cost_weight=args.cost_weight,
+        kd_weighting=args.kd_weighting,
     ).to(device)
     scaler = torch.amp.GradScaler("cuda", enabled=amp_on and amp_dtype == torch.float16)
 
     config_dump = {
         "model": "vision_student",
         **vars(args),
+        "init_vision_ckpt": str(init_vision_ckpt) if init_vision_ckpt else None,
         "save_path": str(save_path),
         "last_path": str(last_path),
         "device_used": str(device),
@@ -524,28 +752,55 @@ def main() -> None:
 
     history, best, bad_epochs, start_epoch = [], {}, 0, 1
     resume_state = None
+    ema_resume_state = None
     if resuming:
-        resume_state = torch.load(last_path, map_location="cpu", weights_only=False)
-        student.load_state_dict(resume_state["model_state_dict"], strict=True)
-        student.to(device)
-        if resume_state.get("scaler_state_dict") and scaler.is_enabled():
-            scaler.load_state_dict(resume_state["scaler_state_dict"])
-        history = list(resume_state.get("history", []))
-        best = dict(resume_state.get("best", {}))
-        bad_epochs = int(resume_state.get("bad_epochs", 0))
-        start_epoch = int(resume_state.get("epoch", 0)) + 1
-        logger.info(f"Resumed from {last_path} (finished epoch {start_epoch - 1}/{args.epochs})")
+        try:
+            cand_state = torch.load(last_path, map_location="cpu", weights_only=False)
+            student.load_state_dict(cand_state["model_state_dict"], strict=True)
+            student.to(device)
+            if cand_state.get("scaler_state_dict") and scaler.is_enabled():
+                scaler.load_state_dict(cand_state["scaler_state_dict"])
+            resume_state = cand_state
+            if args.ema_decay > 0 and cand_state.get("ema_state_dict"):
+                ema_resume_state = cand_state["ema_state_dict"]
+            history = list(resume_state.get("history", []))
+            best = dict(resume_state.get("best", {}))
+            bad_epochs = int(resume_state.get("bad_epochs", 0))
+            start_epoch = int(resume_state.get("epoch", 0)) + 1
+            logger.info(f"Resumed from {last_path} (finished epoch {start_epoch - 1}/{args.epochs})")
+        except Exception as exc:
+            logger.warning(
+                f"Existing checkpoint {last_path} is incompatible with current Multi-View Student architecture "
+                f"({type(exc).__name__}); starting fresh training from Epoch 1."
+            )
+            resuming = False
+            resume_state = None
+
+    ema = ModelEMA(student, args.ema_decay) if args.ema_decay > 0 else None
+    if ema is not None and ema_resume_state is not None:
+        ema.module.load_state_dict(ema_resume_state, strict=True)
+    use_tta = not args.no_tta
+
+    def eval_model() -> VisionStudent:
+        """Model that is validated / saved: the EMA copy when enabled, otherwise the live Student."""
+        return cast(VisionStudent, ema.module) if ema is not None else student
 
     phase2_epochs = max(args.epochs - args.warmup_epochs, 0)
     prefix = "smoke_" if args.smoke else ""
 
     def run_epoch(epoch: int, phase: str, optimizer) -> Dict[str, float]:
+        is_p2 = (phase == "phase2")
         tr = train_one_epoch(
             student, teacher, train_loader, criterion, optimizer, scaler,
             device, amp_on, amp_dtype, args.accum_steps, args.grad_clip,
             args.max_batches, f"{phase} ep {epoch}",
+            feat_target=args.feat_target, ema=ema,
+            mixup_alpha=(args.mixup_alpha if is_p2 else 0.0),
+            mixup_prob=args.mixup_prob,
+            anchor_backbone_params=anchor_backbone_params,
+            l2_sp_weight=(args.l2_sp_weight if is_p2 else 0.0),
         )
-        va = validate_student(student, val_loader, device, amp_on, amp_dtype, args.max_batches)
+        va = validate_student(eval_model(), val_loader, device, amp_on, amp_dtype, args.max_batches, tta=use_tta)
         lrs = {f"lr_{g.get('name', i)}": g["lr"] for i, g in enumerate(optimizer.param_groups)}
         row = {"epoch": epoch, "phase": phase, **tr, **va, **lrs}
         history.append(row)
@@ -562,16 +817,20 @@ def main() -> None:
             best = dict(row)
             _atomic_torch_save(
                 student_checkpoint_dict(
-                    student,
+                    eval_model(),
                     epoch=row["epoch"],
                     phase=row["phase"],
                     val_metrics=row,
+                    is_ema=ema is not None,
                     select_metric=args.select_metric,
                     train_args=vars(args),
                 ),
                 save_path,
             )
-            logger.info(f"  -> Saved best Student ({args.select_metric} = {row[args.select_metric]:.4f}): {save_path}")
+            if args.select_metric == "last":
+                logger.info(f"  -> Saved Student (fixed-epoch mode, epoch {row['epoch']}): {save_path}")
+            else:
+                logger.info(f"  -> Saved best Student ({args.select_metric} = {row[args.select_metric]:.4f}): {save_path}")
             return True
         return False
 
@@ -584,6 +843,7 @@ def main() -> None:
                 optimizer_state_dict=optimizer.state_dict(),
                 scheduler_state_dict=scheduler.state_dict() if scheduler is not None else None,
                 scaler_state_dict=scaler.state_dict() if scaler.is_enabled() else None,
+                ema_state_dict=ema.module.state_dict() if ema is not None else None,
                 best=best,
                 bad_epochs=bad_epochs,
                 history=history,
@@ -664,6 +924,7 @@ def main() -> None:
             save_path, args.manifest, args.data_dir, "valid", results_dir,
             batch_size=args.batch_size, num_workers=args.num_workers,
             image_size=args.image_size, device=device, smoke=args.smoke, seed=args.seed,
+            tta=not args.no_tta,
         )
         logger.info(
             f"VAL  | sample Acc {res_val['metrics']['sample_accuracy']:.4f} | "
@@ -677,6 +938,7 @@ def main() -> None:
                 save_path, args.manifest, args.data_dir, "test", results_dir,
                 batch_size=args.batch_size, num_workers=args.num_workers,
                 image_size=args.image_size, device=device, smoke=args.smoke, seed=args.seed,
+                tta=not args.no_tta,
             )
             logger.info(
                 f"TEST | sample Acc {res_test['metrics']['sample_accuracy']:.4f} | "

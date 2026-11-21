@@ -67,8 +67,12 @@ from src.utils.common import CLASS_ORDER, first_existing, resolve_path, set_seed
 logger = logging.getLogger("train_teacher")
 
 VISION_CKPT_CANDIDATES = [
-    "checkpoints/unimodal/vision/best_vision_unimodal.pth",  # directory name on Google Drive
-    "checkpoints/unimodal/image/best_vision_unimodal.pth",   # legacy local directory name
+    "checkpoints/unimodal/vision/best_convnextv2_multiview.pth",
+    "checkpoints/unimodal/vision/convnextv2_multiview_backbone_256d.pth",
+    "checkpoints/unimodal/vision/best_vision_unimodal.pth",
+    "checkpoints/unimodal/image/best_convnextv2_multiview.pth",
+    "checkpoints/unimodal/image/convnextv2_multiview_backbone_256d.pth",
+    "checkpoints/unimodal/image/best_vision_unimodal.pth",
 ]
 AUDIO_CKPT_CANDIDATES = [
     "checkpoints/unimodal/audio/audio_backbone_teacher.pth",
@@ -81,7 +85,7 @@ SENSOR_CKPT_CANDIDATES = ["checkpoints/unimodal/sensor/best_sensor_unimodal.pth"
 # 1. Command-line arguments
 # ------------------------------------------------------------------------------
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Train Multi-Modal Teacher (2 phases)")
+    p = argparse.ArgumentParser(description="Train Multi-Modal Teacher (2 phases, Multi-View ConvNeXtV2 Gated Attention)")
     # Data & checkpoints
     p.add_argument("--manifest", default="data/final/final_multimodal_manifest.csv")
     p.add_argument("--data-dir", default="data/final")
@@ -96,10 +100,10 @@ def parse_args() -> argparse.Namespace:
     # Training schedule
     p.add_argument("--epochs", type=int, default=30, help="Total epochs (Phase 1 + Phase 2)")
     p.add_argument("--warmup-epochs", type=int, default=5, help="Phase 1 epochs (frozen backbones)")
-    p.add_argument("--batch-size", type=int, default=8)
+    p.add_argument("--batch-size", type=int, default=4, help="Multi-view fruit-bag batch size")
     p.add_argument("--accum-steps", type=int, default=2, help="Gradient accumulation (effective batch = bs x accum)")
     p.add_argument("--lr-head-warmup", type=float, default=1e-3, help="Fusion + Head LR in Phase 1")
-    p.add_argument("--lr-backbone", type=float, default=1e-5, help="LR for the 3 backbones in Phase 2")
+    p.add_argument("--lr-backbone", type=float, default=1.5e-5, help="LR for the 3 backbones in Phase 2")
     p.add_argument("--lr-head", type=float, default=5e-4, help="Fusion + Head LR in Phase 2")
     p.add_argument("--min-lr", type=float, default=1e-6)
     p.add_argument("--weight-decay-head", type=float, default=1e-2)
@@ -125,7 +129,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--proj-dim", type=int, default=256)
     p.add_argument("--latent-dim-mm", type=int, default=256)
     # Model selection metric
-    p.add_argument("--select-metric", default="sample_macro_f1",
+    p.add_argument("--select-metric", default="fruit_macro_f1",
                    choices=["sample_macro_f1", "fruit_macro_f1", "val_loss"])
     # Hardware
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -418,17 +422,26 @@ def main() -> None:
     history, best, bad_epochs, start_epoch = [], {}, 0, 1
     resume_state = None
     if resuming:
-        resume_state = torch.load(last_path, map_location="cpu", weights_only=False)
-        model.load_state_dict(resume_state["model_state_dict"], strict=True)
-        model.to(device)
-        if resume_state.get("scaler_state_dict") and scaler.is_enabled():
-            scaler.load_state_dict(resume_state["scaler_state_dict"])
-        history = list(resume_state.get("history", []))
-        best = dict(resume_state.get("best", {}))
-        bad_epochs = int(resume_state.get("bad_epochs", 0))
-        start_epoch = int(resume_state.get("epoch", 0)) + 1
-        logger.info(f"🔄 Resumed state from {last_path} (completed epoch {start_epoch - 1}/{args.epochs}, "
-                    f"best {args.select_metric} = {best.get(args.select_metric, float('nan')):.4f})")
+        try:
+            cand_state = torch.load(last_path, map_location="cpu", weights_only=False)
+            model.load_state_dict(cand_state["model_state_dict"], strict=True)
+            model.to(device)
+            if cand_state.get("scaler_state_dict") and scaler.is_enabled():
+                scaler.load_state_dict(cand_state["scaler_state_dict"])
+            resume_state = cand_state
+            history = list(resume_state.get("history", []))
+            best = dict(resume_state.get("best", {}))
+            bad_epochs = int(resume_state.get("bad_epochs", 0))
+            start_epoch = int(resume_state.get("epoch", 0)) + 1
+            logger.info(f"🔄 Resumed state from {last_path} (completed epoch {start_epoch - 1}/{args.epochs}, "
+                        f"best {args.select_metric} = {best.get(args.select_metric, float('nan')):.4f})")
+        except Exception as exc:
+            logger.warning(
+                f"Existing checkpoint {last_path} is incompatible with current Multi-View Teacher architecture "
+                f"({type(exc).__name__}); starting fresh training from Epoch 1."
+            )
+            resuming = False
+            resume_state = None
 
     phase2_epochs = max(args.epochs - args.warmup_epochs, 0)
     prefix = "smoke_" if args.smoke else ""

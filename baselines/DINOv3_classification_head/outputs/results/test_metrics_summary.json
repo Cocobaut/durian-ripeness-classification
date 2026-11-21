@@ -1,0 +1,48 @@
+{
+  "model": "DINOv3 (vit_base_patch16_dinov3.lvd1689m) + Classification Head",
+  "feature_dim": 768,
+  "image_size": 384,
+  "use_tta": true,
+  "best_epoch": 35,
+  "test_loss": 1.141933299551074,
+  "image_level_accuracy": 0.3859060402684564,
+  "image_level_macro_f1": 0.3877053524112348,
+  "fruit_level_accuracy": 0.4583333333333333,
+  "fruit_level_macro_f1": 0.4475404196766426,
+  "total_test_images": 298,
+  "total_test_fruits": 24,
+  "classification_report": {
+    "Unripe": {
+      "precision": 0.3090909090909091,
+      "recall": 0.5666666666666667,
+      "f1-score": 0.4,
+      "support": 60.0
+    },
+    "Ripe": {
+      "precision": 0.3611111111111111,
+      "recall": 0.34210526315789475,
+      "f1-score": 0.35135135135135137,
+      "support": 114.0
+    },
+    "Overripe": {
+      "precision": 0.525,
+      "recall": 0.3387096774193548,
+      "f1-score": 0.4117647058823529,
+      "support": 124.0
+    },
+    "accuracy": 0.3859060402684564,
+    "macro avg": {
+      "precision": 0.39840067340067337,
+      "recall": 0.4158272024146387,
+      "f1-score": 0.3877053524112348,
+      "support": 298.0
+    },
+    "weighted avg": {
+      "precision": 0.41883262151718526,
+      "recall": 0.3859060402684564,
+      "f1-score": 0.38628482410559006,
+      "support": 298.0
+    }
+  },
+  "timestamp": "2026-11-20 15:33:23"
+}

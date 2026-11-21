@@ -20,11 +20,18 @@ from src.models.teacher_model import (
     build_teacher_from_checkpoint,
     teacher_checkpoint_dict,
 )
-from src.models.vision_backbone import VISION_MODEL_NAME, VisionBackbone
+from src.models.vision_backbone import (
+    VISION_ATTN_HIDDEN_DIM,
+    VISION_EMBED_DIM,
+    VISION_MODEL_NAME,
+    LightweightGatedAttention,
+    VisionBackbone,
+)
 
 __all__ = [
     "AudioBackbone",
     "DEFAULT_STUDENT_BACKBONE",
+    "LightweightGatedAttention",
     "MODALITIES",
     "MultiModalTeacher",
     "MultimodalFusion",
@@ -33,6 +40,8 @@ __all__ = [
     "SensorBackbone",
     "StudentConfig",
     "TeacherConfig",
+    "VISION_ATTN_HIDDEN_DIM",
+    "VISION_EMBED_DIM",
     "VISION_MODEL_NAME",
     "VisionBackbone",
     "VisionStudent",

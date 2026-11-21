@@ -1,0 +1,50 @@
+{
+  "model": "Multi-View ConvNeXt V2-Base (convnextv2_base.fcmae_ft_in1k) + 256-d Projection + Lightweight Gated Attention (Ilse et al., D=128)",
+  "image_size": 384,
+  "backbone_dim": 1024,
+  "embed_dim": 256,
+  "attn_hidden_dim": 128,
+  "use_tta": true,
+  "best_epoch": 25,
+  "test_bag_loss": 1.2071138347188632,
+  "fruit_level_accuracy": 0.5833333333333334,
+  "fruit_level_macro_f1": 0.5559099769626085,
+  "image_level_accuracy": 0.3825503355704698,
+  "image_level_macro_f1": 0.3805248922537023,
+  "total_test_fruits": 24,
+  "total_test_images": 298,
+  "fruit_classification_report": {
+    "Unripe": {
+      "precision": 0.7,
+      "recall": 0.875,
+      "f1-score": 0.7777777777777778,
+      "support": 8.0
+    },
+    "Ripe": {
+      "precision": 0.45454545454545453,
+      "recall": 0.625,
+      "f1-score": 0.5263157894736842,
+      "support": 8.0
+    },
+    "Overripe": {
+      "precision": 0.6666666666666666,
+      "recall": 0.25,
+      "f1-score": 0.36363636363636365,
+      "support": 8.0
+    },
+    "accuracy": 0.5833333333333334,
+    "macro avg": {
+      "precision": 0.6070707070707071,
+      "recall": 0.5833333333333334,
+      "f1-score": 0.5559099769626085,
+      "support": 24.0
+    },
+    "weighted avg": {
+      "precision": 0.6070707070707071,
+      "recall": 0.5833333333333334,
+      "f1-score": 0.5559099769626085,
+      "support": 24.0
+    }
+  },
+  "timestamp": "2026-11-20 16:57:07"
+}
