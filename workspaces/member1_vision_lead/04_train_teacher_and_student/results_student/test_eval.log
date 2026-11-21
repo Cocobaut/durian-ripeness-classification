@@ -1,10 +1,10 @@
-[2026-11-20 22:53:34,535] [INFO] === STARTING FULL TEACHER EVALUATION PIPELINE ===
-[2026-11-20 22:53:34,535] [INFO] model=vision_student | split=test | input_mode=vision | strategy=mean_prob
-[2026-11-20 22:53:34,536] [INFO] Starting sample-level evaluation (mask_modality=None)...
-[2026-11-20 22:54:00,648] [INFO] Evaluated 24 samples, accuracy = 0.5000
-[2026-11-20 22:54:00,649] [INFO] Aggregating fruit-level predictions (fruit_id) using strategy: mean_prob...
-[2026-11-20 22:54:00,671] [INFO] Aggregated 24 fruits, fruit-level accuracy = 0.5000
-[2026-11-20 22:54:01,598] [INFO] Starting Modality Ablation Study...
-[2026-11-20 22:54:01,599] [INFO] Skipping ablation for unimodal model (input_mode=vision).
-[2026-11-20 22:54:01,602] [INFO] [test] sample Macro-F1 = 0.4868 | fruit Macro-F1 = 0.4868
-[2026-11-20 22:54:01,602] [INFO] === EVALUATION COMPLETE ===
+[2026-11-21 03:42:49,626] [INFO] === STARTING FULL TEACHER EVALUATION PIPELINE ===
+[2026-11-21 03:42:49,626] [INFO] model=vision_student | split=test | input_mode=vision | strategy=mean_prob
+[2026-11-21 03:42:49,626] [INFO] Starting sample-level evaluation (mask_modality=None)...
+[2026-11-21 03:43:01,916] [INFO] Evaluated 24 samples, accuracy = 0.5417
+[2026-11-21 03:43:01,916] [INFO] Aggregating fruit-level predictions (fruit_id) using strategy: mean_prob...
+[2026-11-21 03:43:01,939] [INFO] Aggregated 24 fruits, fruit-level accuracy = 0.5417
+[2026-11-21 03:43:02,571] [INFO] Starting Modality Ablation Study...
+[2026-11-21 03:43:02,571] [INFO] Skipping ablation for unimodal model (input_mode=vision).
+[2026-11-21 03:43:02,574] [INFO] [test] sample Macro-F1 = 0.5185 | fruit Macro-F1 = 0.5185
+[2026-11-21 03:43:02,575] [INFO] === EVALUATION COMPLETE ===
